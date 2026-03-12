@@ -8,6 +8,7 @@ import Link from "next/link";
 import { useSidebarContext } from "@/components/sidebar-layout";
 import { formatModelNameLower } from "@/lib/format";
 import { SHORTCUT_LABELS } from "@/lib/keyboard-shortcuts";
+import { getHydratedSelectedModel, shouldResetSelectedModel } from "@/lib/model-selection";
 import {
   DEFAULT_MODEL,
   getDefaultReasoningEffort,
@@ -78,10 +79,7 @@ export default function Home() {
     if (enabledModels.length === 0 || hasHydratedModelPreferences.current) return;
 
     const storedModel = localStorage.getItem(LAST_SELECTED_MODEL_STORAGE_KEY);
-    const selectedModelFromStorage =
-      storedModel && enabledModels.includes(storedModel)
-        ? storedModel
-        : (enabledModels[0] ?? DEFAULT_MODEL);
+    const selectedModelFromStorage = getHydratedSelectedModel(enabledModels, storedModel);
 
     const storedReasoningEffort = localStorage.getItem(LAST_SELECTED_REASONING_EFFORT_STORAGE_KEY);
     const reasoningEffortFromStorage =
@@ -180,7 +178,9 @@ export default function Home() {
 
   // Reset selections when model preferences change
   useEffect(() => {
-    if (enabledModels.length > 0 && !enabledModels.includes(selectedModel)) {
+    if (
+      shouldResetSelectedModel(enabledModels, selectedModel, hasHydratedModelPreferences.current)
+    ) {
       const fallback = enabledModels[0] ?? DEFAULT_MODEL;
       setSelectedModel(fallback);
       setReasoningEffort(getDefaultReasoningEffort(fallback));
