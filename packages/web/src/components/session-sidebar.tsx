@@ -239,8 +239,15 @@ function UserMenu({ user }: { user?: { name?: string | null; image?: string | nu
         setOpen(false);
       }
     }
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") setOpen(false);
+    }
     document.addEventListener("mousedown", handleClick);
-    return () => document.removeEventListener("mousedown", handleClick);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handleClick);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
   }, [open]);
 
   function toggle() {
@@ -259,6 +266,8 @@ function UserMenu({ user }: { user?: { name?: string | null; image?: string | nu
       <button
         ref={buttonRef}
         onClick={toggle}
+        aria-haspopup="menu"
+        aria-expanded={open}
         className="w-7 h-7 rounded-full overflow-hidden focus:outline-none focus:ring-2 focus:ring-primary"
         title={`Signed in as ${user?.name || "User"}`}
       >
@@ -277,13 +286,15 @@ function UserMenu({ user }: { user?: { name?: string | null; image?: string | nu
       {open && menuPos && (
         <div
           ref={menuRef}
+          role="menu"
           className="fixed w-48 rounded-md border border-border bg-background shadow-lg py-1 z-[100]"
-          style={{ top: menuPos.top, left: menuPos.left }}
+          style={{ top: menuPos.top, left: Math.min(menuPos.left, window.innerWidth - 200) }}
         >
           <div className="px-3 py-2 border-b border-border">
             <p className="text-sm font-medium text-foreground truncate">{user?.name || "User"}</p>
           </div>
           <button
+            role="menuitem"
             onClick={() => signOut()}
             className="w-full flex items-center gap-2 px-3 py-2 text-sm text-muted-foreground hover:text-foreground hover:bg-muted transition"
           >
