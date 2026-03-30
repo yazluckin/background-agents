@@ -51,22 +51,11 @@ export interface StoredTokenData {
 
 // ─── Repo / Config Types ─────────────────────────────────────────────────────
 
-/**
- * A single repo configuration with an optional label filter.
- * Used for static team→repo mapping (legacy/override).
- */
-export interface StaticRepoConfig {
-  owner: string;
-  name: string;
-  label?: string;
-}
-
-/**
- * Static team→repo mapping stored in KV under "config:team-repos".
- */
-export interface TeamRepoMapping {
-  [teamId: string]: StaticRepoConfig[];
-}
+export type {
+  StaticRepoConfig,
+  TeamRepoMapping,
+  ProjectRepoMapping,
+} from "@open-inspect/shared";
 
 /**
  * Dynamic repo config from control plane.
@@ -77,13 +66,6 @@ export type {
   ControlPlaneRepo,
   ControlPlaneReposResponse,
 } from "@open-inspect/shared";
-
-/**
- * Project→repo mapping stored in KV under "config:project-repos".
- */
-export interface ProjectRepoMapping {
-  [projectId: string]: { owner: string; name: string };
-}
 
 /**
  * Trigger configuration stored in KV under "config:triggers".

@@ -36,17 +36,42 @@ export interface CodeServerSettings {
   enabled?: boolean;
 }
 
+// ─── Linear Repository Mapping Types ────────────────────────────────────────
+
+/** A single repo target with an optional label filter for team→repo mappings. */
+export interface StaticRepoConfig {
+  owner: string;
+  name: string;
+  label?: string;
+}
+
+/** Maps Linear team IDs to one or more GitHub repo targets. */
+export type TeamRepoMapping = Record<string, StaticRepoConfig[]>;
+
+/** Maps Linear project IDs to a single GitHub repo target. */
+export type ProjectRepoMapping = Record<string, { owner: string; name: string }>;
+
 /** Maps each integration ID to its global and per-repo settings types. */
 export interface IntegrationSettingsMap {
   github: IntegrationEntry<GitHubBotSettings>;
-  linear: IntegrationEntry<LinearBotSettings>;
+  linear: {
+    global: LinearGlobalConfig;
+    repo: LinearBotSettings;
+  };
   "code-server": IntegrationEntry<CodeServerSettings>;
 }
 
 /** Derived type for the GitHub bot global config. */
 export type GitHubGlobalConfig = IntegrationSettingsMap["github"]["global"];
-export type LinearGlobalConfig = IntegrationSettingsMap["linear"]["global"];
 export type CodeServerGlobalConfig = IntegrationSettingsMap["code-server"]["global"];
+
+/** Global config for the Linear integration, including repository mappings. */
+export interface LinearGlobalConfig {
+  enabledRepos?: string[];
+  defaults?: LinearBotSettings;
+  teamRepos?: TeamRepoMapping;
+  projectRepos?: ProjectRepoMapping;
+}
 
 export const INTEGRATION_DEFINITIONS: {
   id: IntegrationId;

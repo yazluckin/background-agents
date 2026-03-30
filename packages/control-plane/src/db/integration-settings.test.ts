@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
+import type { TeamRepoMapping, ProjectRepoMapping } from "@open-inspect/shared";
 import {
   IntegrationSettingsStore,
   IntegrationSettingsValidationError,
@@ -700,6 +701,95 @@ describe("IntegrationSettingsStore", () => {
           defaults: { allowUserPreferenceOverride: "invalid" as unknown as boolean },
         })
       ).rejects.toThrow(IntegrationSettingsValidationError);
+    });
+
+    it("round-trips teamRepos in global linear settings", async () => {
+      await store.setGlobal("linear", {
+        defaults: { model: "anthropic/claude-sonnet-4-6" },
+        teamRepos: {
+          "team-abc": [
+            { owner: "acme", name: "platform" },
+            { owner: "acme", name: "api", label: "backend" },
+          ],
+        },
+      });
+
+      const result = await store.getGlobal("linear");
+      expect(result?.teamRepos).toEqual({
+        "team-abc": [
+          { owner: "acme", name: "platform" },
+          { owner: "acme", name: "api", label: "backend" },
+        ],
+      });
+    });
+
+    it("round-trips projectRepos in global linear settings", async () => {
+      await store.setGlobal("linear", {
+        projectRepos: {
+          "proj-123": { owner: "acme", name: "widgets" },
+          "proj-456": { owner: "acme", name: "gadgets" },
+        },
+      });
+
+      const result = await store.getGlobal("linear");
+      expect(result?.projectRepos).toEqual({
+        "proj-123": { owner: "acme", name: "widgets" },
+        "proj-456": { owner: "acme", name: "gadgets" },
+      });
+    });
+
+    it("rejects teamRepos that is not an object", async () => {
+      await expect(
+        store.setGlobal("linear", {
+          teamRepos: "invalid" as unknown as TeamRepoMapping,
+        })
+      ).rejects.toThrow("teamRepos must be an object");
+    });
+
+    it("rejects teamRepos with non-array values", async () => {
+      await expect(
+        store.setGlobal("linear", {
+          teamRepos: { "team-1": "not-an-array" } as unknown as TeamRepoMapping,
+        })
+      ).rejects.toThrow('teamRepos["team-1"] must be an array');
+    });
+
+    it("rejects teamRepos entries missing owner", async () => {
+      await expect(
+        store.setGlobal("linear", {
+          teamRepos: {
+            "team-1": [{ name: "repo" }],
+          } as unknown as TeamRepoMapping,
+        })
+      ).rejects.toThrow('teamRepos["team-1"] entries must have string owner and name');
+    });
+
+    it("rejects teamRepos entries with non-string label", async () => {
+      await expect(
+        store.setGlobal("linear", {
+          teamRepos: {
+            "team-1": [{ owner: "acme", name: "repo", label: 123 }],
+          } as unknown as TeamRepoMapping,
+        })
+      ).rejects.toThrow('teamRepos["team-1"] label must be a string');
+    });
+
+    it("rejects projectRepos that is not an object", async () => {
+      await expect(
+        store.setGlobal("linear", {
+          projectRepos: [1, 2, 3] as unknown as ProjectRepoMapping,
+        })
+      ).rejects.toThrow("projectRepos must be an object");
+    });
+
+    it("rejects projectRepos entries missing owner/name", async () => {
+      await expect(
+        store.setGlobal("linear", {
+          projectRepos: {
+            "proj-1": { owner: "acme" },
+          } as unknown as ProjectRepoMapping,
+        })
+      ).rejects.toThrow('projectRepos["proj-1"] must have string owner and name');
     });
 
     it("merges linear global and repo settings", async () => {

@@ -9,6 +9,9 @@ import {
   type EnrichedRepository,
   type LinearBotSettings,
   type LinearGlobalConfig,
+  type TeamRepoMapping,
+  type ProjectRepoMapping,
+  type StaticRepoConfig,
   type ValidModel,
 } from "@open-inspect/shared";
 import { useEnabledModels } from "@/hooks/use-enabled-models";
@@ -100,6 +103,8 @@ export function LinearIntegrationSettings() {
         availableRepos={availableRepos}
         enabledModelOptions={enabledModelOptions}
       />
+
+      <RepositoryMappingsSection settings={settings} availableRepos={availableRepos} />
 
       <Section
         title="Repository Overrides"
@@ -467,6 +472,356 @@ function GlobalSettingsSection({
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+    </Section>
+  );
+}
+
+// ─── Repository Mappings Section ─────────────────────────────────────────────
+
+interface TeamMappingEntry {
+  teamId: string;
+  repos: StaticRepoConfig[];
+}
+
+interface ProjectMappingEntry {
+  projectId: string;
+  owner: string;
+  name: string;
+}
+
+function toTeamEntries(mapping?: TeamRepoMapping): TeamMappingEntry[] {
+  if (!mapping) return [];
+  return Object.entries(mapping).map(([teamId, repos]) => ({ teamId, repos: [...repos] }));
+}
+
+function toProjectEntries(mapping?: ProjectRepoMapping): ProjectMappingEntry[] {
+  if (!mapping) return [];
+  return Object.entries(mapping).map(([projectId, repo]) => ({
+    projectId,
+    owner: repo.owner,
+    name: repo.name,
+  }));
+}
+
+function fromTeamEntries(entries: TeamMappingEntry[]): TeamRepoMapping {
+  const mapping: TeamRepoMapping = {};
+  for (const e of entries) {
+    if (e.teamId) mapping[e.teamId] = e.repos;
+  }
+  return mapping;
+}
+
+function fromProjectEntries(entries: ProjectMappingEntry[]): ProjectRepoMapping {
+  const mapping: ProjectRepoMapping = {};
+  for (const e of entries) {
+    if (e.projectId && e.owner && e.name) mapping[e.projectId] = { owner: e.owner, name: e.name };
+  }
+  return mapping;
+}
+
+function RepositoryMappingsSection({
+  settings,
+  availableRepos,
+}: {
+  settings: LinearGlobalConfig | null | undefined;
+  availableRepos: EnrichedRepository[];
+}) {
+  const [teamEntries, setTeamEntries] = useState<TeamMappingEntry[]>(() =>
+    toTeamEntries(settings?.teamRepos)
+  );
+  const [projectEntries, setProjectEntries] = useState<ProjectMappingEntry[]>(() =>
+    toProjectEntries(settings?.projectRepos)
+  );
+  const [saving, setSaving] = useState(false);
+  const [dirty, setDirty] = useState(false);
+  const [initialized, setInitialized] = useState(false);
+
+  useEffect(() => {
+    if (settings !== undefined && !initialized) {
+      setTeamEntries(toTeamEntries(settings?.teamRepos));
+      setProjectEntries(toProjectEntries(settings?.projectRepos));
+      setInitialized(true);
+    }
+  }, [settings, initialized]);
+
+  const handleSave = async () => {
+    // Check for duplicate team/project IDs
+    const teamIds = teamEntries.map((e) => e.teamId).filter(Boolean);
+    if (new Set(teamIds).size !== teamIds.length) {
+      toast.error("Duplicate team IDs found. Each team can only be mapped once.");
+      return;
+    }
+    const projectIds = projectEntries.map((e) => e.projectId).filter(Boolean);
+    if (new Set(projectIds).size !== projectIds.length) {
+      toast.error("Duplicate project IDs found. Each project can only be mapped once.");
+      return;
+    }
+
+    setSaving(true);
+    try {
+      // Read-modify-write: fetch current settings, merge mappings, save
+      const res = await fetch(GLOBAL_SETTINGS_KEY);
+      const current = res.ok ? ((await res.json()) as GlobalResponse) : null;
+      const merged: LinearGlobalConfig = {
+        ...(current?.settings ?? {}),
+        teamRepos: fromTeamEntries(teamEntries),
+        projectRepos: fromProjectEntries(projectEntries),
+      };
+
+      const saveRes = await fetch(GLOBAL_SETTINGS_KEY, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ settings: merged }),
+      });
+
+      if (saveRes.ok) {
+        mutate(GLOBAL_SETTINGS_KEY);
+        setDirty(false);
+        toast.success("Repository mappings saved.");
+      } else {
+        const data = await saveRes.json();
+        toast.error(data.error || "Failed to save mappings");
+      }
+    } catch {
+      toast.error("Failed to save mappings");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const addTeamEntry = () => {
+    setTeamEntries((prev) => [...prev, { teamId: "", repos: [] }]);
+    setDirty(true);
+  };
+
+  const removeTeamEntry = (index: number) => {
+    setTeamEntries((prev) => prev.filter((_, i) => i !== index));
+    setDirty(true);
+  };
+
+  const updateTeamId = (index: number, teamId: string) => {
+    setTeamEntries((prev) => prev.map((e, i) => (i === index ? { ...e, teamId } : e)));
+    setDirty(true);
+  };
+
+  const addTeamRepo = (index: number) => {
+    setTeamEntries((prev) =>
+      prev.map((e, i) =>
+        i === index ? { ...e, repos: [...e.repos, { owner: "", name: "" }] } : e
+      )
+    );
+    setDirty(true);
+  };
+
+  const updateTeamRepo = (entryIndex: number, repoIndex: number, repoFullName: string) => {
+    const [owner, name] = repoFullName.split("/");
+    setTeamEntries((prev) =>
+      prev.map((e, i) =>
+        i === entryIndex
+          ? {
+              ...e,
+              repos: e.repos.map((r, j) =>
+                j === repoIndex ? { ...r, owner, name } : r
+              ),
+            }
+          : e
+      )
+    );
+    setDirty(true);
+  };
+
+  const updateTeamRepoLabel = (entryIndex: number, repoIndex: number, label: string) => {
+    setTeamEntries((prev) =>
+      prev.map((e, i) =>
+        i === entryIndex
+          ? {
+              ...e,
+              repos: e.repos.map((r, j) =>
+                j === repoIndex ? { ...r, label: label || undefined } : r
+              ),
+            }
+          : e
+      )
+    );
+    setDirty(true);
+  };
+
+  const removeTeamRepo = (entryIndex: number, repoIndex: number) => {
+    setTeamEntries((prev) =>
+      prev.map((e, i) =>
+        i === entryIndex ? { ...e, repos: e.repos.filter((_, j) => j !== repoIndex) } : e
+      )
+    );
+    setDirty(true);
+  };
+
+  const addProjectEntry = () => {
+    setProjectEntries((prev) => [...prev, { projectId: "", owner: "", name: "" }]);
+    setDirty(true);
+  };
+
+  const removeProjectEntry = (index: number) => {
+    setProjectEntries((prev) => prev.filter((_, i) => i !== index));
+    setDirty(true);
+  };
+
+  const updateProjectId = (index: number, projectId: string) => {
+    setProjectEntries((prev) => prev.map((e, i) => (i === index ? { ...e, projectId } : e)));
+    setDirty(true);
+  };
+
+  const updateProjectRepo = (index: number, repoFullName: string) => {
+    const [owner, name] = repoFullName.split("/");
+    setProjectEntries((prev) =>
+      prev.map((e, i) => (i === index ? { ...e, owner, name } : e))
+    );
+    setDirty(true);
+  };
+
+  return (
+    <Section
+      title="Repository Mapping"
+      description="Map Linear teams or projects to specific GitHub repositories. Project mappings take priority over team mappings."
+    >
+      {/* Team Mappings */}
+      <div className="mb-6">
+        <p className="text-sm font-medium text-foreground mb-2">Team Mappings</p>
+        {teamEntries.length === 0 ? (
+          <p className="text-sm text-muted-foreground mb-3">
+            No team mappings configured. Issues will use Linear API suggestions or LLM classification
+            to determine the target repository.
+          </p>
+        ) : (
+          <div className="space-y-3 mb-3">
+            {teamEntries.map((entry, entryIndex) => (
+              <div
+                key={entryIndex}
+                className="border border-border rounded-sm px-4 py-3"
+              >
+                <div className="flex items-center gap-2 mb-2">
+                  <input
+                    type="text"
+                    value={entry.teamId}
+                    onChange={(e) => updateTeamId(entryIndex, e.target.value)}
+                    placeholder="Linear Team ID"
+                    className="flex-1 rounded-sm border border-border bg-background px-3 py-1.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+                  />
+                  <Button
+                    variant="destructive"
+                    size="sm"
+                    onClick={() => removeTeamEntry(entryIndex)}
+                  >
+                    Remove
+                  </Button>
+                </div>
+
+                {entry.repos.map((repo, repoIndex) => (
+                  <div key={repoIndex} className="flex items-center gap-2 mb-2 ml-4">
+                    <Select
+                      value={repo.owner && repo.name ? `${repo.owner}/${repo.name}` : ""}
+                      onValueChange={(v) => updateTeamRepo(entryIndex, repoIndex, v)}
+                    >
+                      <SelectTrigger density="compact" className="flex-1">
+                        <SelectValue placeholder="Select repository" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {availableRepos.map((r) => (
+                          <SelectItem key={r.fullName} value={r.fullName}>
+                            {r.fullName}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <input
+                      type="text"
+                      value={repo.label ?? ""}
+                      onChange={(e) => updateTeamRepoLabel(entryIndex, repoIndex, e.target.value)}
+                      placeholder="Label filter (optional)"
+                      className="w-40 rounded-sm border border-border bg-background px-2 py-1.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+                    />
+                    <Button
+                      variant="destructive"
+                      size="sm"
+                      onClick={() => removeTeamRepo(entryIndex, repoIndex)}
+                    >
+                      &times;
+                    </Button>
+                  </div>
+                ))}
+
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="ml-4"
+                  onClick={() => addTeamRepo(entryIndex)}
+                >
+                  + Add repo target
+                </Button>
+              </div>
+            ))}
+          </div>
+        )}
+        <Button variant="outline" size="sm" onClick={addTeamEntry}>
+          + Add team mapping
+        </Button>
+      </div>
+
+      {/* Project Mappings */}
+      <div className="mb-4">
+        <p className="text-sm font-medium text-foreground mb-2">Project Mappings</p>
+        {projectEntries.length === 0 ? (
+          <p className="text-sm text-muted-foreground mb-3">
+            No project mappings configured.
+          </p>
+        ) : (
+          <div className="space-y-2 mb-3">
+            {projectEntries.map((entry, index) => (
+              <div
+                key={index}
+                className="flex items-center gap-2 border border-border rounded-sm px-4 py-2"
+              >
+                <input
+                  type="text"
+                  value={entry.projectId}
+                  onChange={(e) => updateProjectId(index, e.target.value)}
+                  placeholder="Linear Project ID"
+                  className="flex-1 rounded-sm border border-border bg-background px-3 py-1.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+                />
+                <span className="text-muted-foreground text-sm">&rarr;</span>
+                <Select
+                  value={entry.owner && entry.name ? `${entry.owner}/${entry.name}` : ""}
+                  onValueChange={(v) => updateProjectRepo(index, v)}
+                >
+                  <SelectTrigger density="compact" className="flex-1">
+                    <SelectValue placeholder="Select repository" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {availableRepos.map((r) => (
+                      <SelectItem key={r.fullName} value={r.fullName}>
+                        {r.fullName}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  onClick={() => removeProjectEntry(index)}
+                >
+                  Remove
+                </Button>
+              </div>
+            ))}
+          </div>
+        )}
+        <Button variant="outline" size="sm" onClick={addProjectEntry}>
+          + Add project mapping
+        </Button>
+      </div>
+
+      <Button onClick={handleSave} disabled={saving || !dirty}>
+        {saving ? "Saving..." : "Save Mappings"}
+      </Button>
     </Section>
   );
 }

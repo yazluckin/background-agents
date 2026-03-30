@@ -20,7 +20,7 @@ import {
 import { buildInternalAuthHeaders } from "./utils/internal";
 import { classifyRepo } from "./classifier";
 import { getAvailableRepos } from "./classifier/repos";
-import { getLinearConfig } from "./utils/integration-config";
+import { getLinearConfig, getLinearGlobalConfig } from "./utils/integration-config";
 import { createLogger } from "./logger";
 import { makePlan } from "./plan";
 import {
@@ -29,8 +29,6 @@ import {
   resolveSessionModelSettings,
 } from "./model-resolution";
 import {
-  getTeamRepoMapping,
-  getProjectRepoMapping,
   getUserPreferences,
   lookupIssueSession,
   storeIssueSession,
@@ -313,15 +311,17 @@ async function handleNewSession(
 
   // ─── Resolve repo ─────────────────────────────────────────────────────
 
+  // Fetch global config for repo mappings (needed before repo is known)
+  const globalConfig = await getLinearGlobalConfig(env);
+
   let repoOwner: string | null = null;
   let repoName: string | null = null;
   let repoFullName: string | null = null;
   let classificationReasoning: string | null = null;
 
   // 1. Check project→repo mapping FIRST
-  if (projectInfo?.id) {
-    const projectMapping = await getProjectRepoMapping(env);
-    const mapped = projectMapping[projectInfo.id];
+  if (projectInfo?.id && globalConfig?.projectRepos) {
+    const mapped = globalConfig.projectRepos[projectInfo.id];
     if (mapped) {
       repoOwner = mapped.owner;
       repoName = mapped.name;
@@ -331,11 +331,10 @@ async function handleNewSession(
   }
 
   // 2. Check static team→repo mapping (override)
-  if (!repoOwner) {
-    const teamMapping = await getTeamRepoMapping(env);
+  if (!repoOwner && globalConfig?.teamRepos) {
     const teamId = issue.team?.id ?? "";
-    if (teamId && teamMapping[teamId] && teamMapping[teamId].length > 0) {
-      const staticRepo = resolveStaticRepo(teamMapping, teamId, labelNames);
+    if (teamId && globalConfig.teamRepos[teamId]?.length > 0) {
+      const staticRepo = resolveStaticRepo(globalConfig.teamRepos, teamId, labelNames);
       if (staticRepo) {
         repoOwner = staticRepo.owner;
         repoName = staticRepo.name;

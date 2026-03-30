@@ -6,6 +6,7 @@ import {
   type IntegrationSettingsMap,
   type GitHubBotSettings,
   type LinearBotSettings,
+  type LinearGlobalConfig,
   type CodeServerSettings,
 } from "@open-inspect/shared";
 
@@ -59,6 +60,16 @@ export class IntegrationSettingsStore {
         ...settings,
         defaults: this.validateAndNormalizeSettings(integrationId, settings.defaults),
       };
+    }
+
+    if (integrationId === "linear") {
+      const linearGlobal = settings as LinearGlobalConfig;
+      if (linearGlobal.teamRepos !== undefined) {
+        this.validateTeamRepoMapping(linearGlobal.teamRepos);
+      }
+      if (linearGlobal.projectRepos !== undefined) {
+        this.validateProjectRepoMapping(linearGlobal.projectRepos);
+      }
     }
 
     const now = Date.now();
@@ -282,6 +293,56 @@ export class IntegrationSettingsStore {
   private validateCodeServerSettings(settings: CodeServerSettings): void {
     if (settings.enabled !== undefined && typeof settings.enabled !== "boolean") {
       throw new IntegrationSettingsValidationError("enabled must be a boolean");
+    }
+  }
+
+  private validateTeamRepoMapping(mapping: unknown): void {
+    if (typeof mapping !== "object" || mapping === null || Array.isArray(mapping)) {
+      throw new IntegrationSettingsValidationError("teamRepos must be an object");
+    }
+    for (const [teamId, repos] of Object.entries(mapping)) {
+      if (!Array.isArray(repos)) {
+        throw new IntegrationSettingsValidationError(
+          `teamRepos["${teamId}"] must be an array of repo configs`
+        );
+      }
+      for (const repo of repos) {
+        if (typeof repo !== "object" || repo === null) {
+          throw new IntegrationSettingsValidationError(
+            `teamRepos["${teamId}"] entries must be objects with owner and name`
+          );
+        }
+        const r = repo as Record<string, unknown>;
+        if (typeof r.owner !== "string" || typeof r.name !== "string") {
+          throw new IntegrationSettingsValidationError(
+            `teamRepos["${teamId}"] entries must have string owner and name`
+          );
+        }
+        if (r.label !== undefined && typeof r.label !== "string") {
+          throw new IntegrationSettingsValidationError(
+            `teamRepos["${teamId}"] label must be a string`
+          );
+        }
+      }
+    }
+  }
+
+  private validateProjectRepoMapping(mapping: unknown): void {
+    if (typeof mapping !== "object" || mapping === null || Array.isArray(mapping)) {
+      throw new IntegrationSettingsValidationError("projectRepos must be an object");
+    }
+    for (const [projectId, repo] of Object.entries(mapping)) {
+      if (typeof repo !== "object" || repo === null) {
+        throw new IntegrationSettingsValidationError(
+          `projectRepos["${projectId}"] must be an object with owner and name`
+        );
+      }
+      const r = repo as Record<string, unknown>;
+      if (typeof r.owner !== "string" || typeof r.name !== "string") {
+        throw new IntegrationSettingsValidationError(
+          `projectRepos["${projectId}"] must have string owner and name`
+        );
+      }
     }
   }
 }

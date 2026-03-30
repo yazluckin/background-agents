@@ -8,6 +8,7 @@ import {
   type GitHubBotSettings,
   type IntegrationId,
   type LinearBotSettings,
+  type LinearGlobalConfig,
 } from "@open-inspect/shared";
 import {
   IntegrationSettingsStore,
@@ -289,6 +290,52 @@ async function handleGetResolvedConfig(
 
   const store = new IntegrationSettingsStore(env.DB);
   const repo = `${owner}/${name}`;
+
+  // Linear handles its own global+repo fetch to include teamRepos/projectRepos
+  // without a redundant getGlobal call.
+  if (id === "linear") {
+    const [globalSettings, repoSettings] = await Promise.all([
+      store.getGlobal("linear") as Promise<LinearGlobalConfig | null>,
+      store.getRepoSettings("linear", repo),
+    ]);
+
+    const linearEnabledRepos =
+      globalSettings?.enabledRepos !== undefined ? globalSettings.enabledRepos : null;
+
+    // Merge defaults + per-repo overrides (same logic as getResolvedConfig)
+    const defaults = (globalSettings?.defaults ?? {}) as LinearBotSettings;
+    const overrides = (repoSettings ?? {}) as LinearBotSettings;
+    const merged: LinearBotSettings = { ...defaults };
+    for (const [key, value] of Object.entries(overrides)) {
+      if (value !== undefined) {
+        (merged as Record<string, unknown>)[key] = value;
+      }
+    }
+
+    const linearReasoningEffort =
+      merged.model &&
+      merged.reasoningEffort &&
+      !isValidReasoningEffort(merged.model, merged.reasoningEffort)
+        ? null
+        : (merged.reasoningEffort ?? null);
+
+    return json({
+      integrationId: id,
+      repo,
+      config: {
+        model: merged.model ?? null,
+        reasoningEffort: linearReasoningEffort,
+        allowUserPreferenceOverride: merged.allowUserPreferenceOverride ?? true,
+        allowLabelModelOverride: merged.allowLabelModelOverride ?? true,
+        emitToolProgressActivities: merged.emitToolProgressActivities ?? true,
+        issueSessionInstructions: merged.issueSessionInstructions ?? null,
+        enabledRepos: linearEnabledRepos,
+        teamRepos: globalSettings?.teamRepos ?? null,
+        projectRepos: globalSettings?.projectRepos ?? null,
+      },
+    });
+  }
+
   const { enabledRepos, settings } = await store.getResolvedConfig(id, repo);
 
   if (id === "github") {
@@ -311,30 +358,6 @@ async function handleGetResolvedConfig(
         allowedTriggerUsers: githubSettings.allowedTriggerUsers ?? null,
         codeReviewInstructions: githubSettings.codeReviewInstructions ?? null,
         commentActionInstructions: githubSettings.commentActionInstructions ?? null,
-      },
-    });
-  }
-
-  if (id === "linear") {
-    const linearSettings = settings as LinearBotSettings;
-    const linearReasoningEffort =
-      linearSettings.model &&
-      linearSettings.reasoningEffort &&
-      !isValidReasoningEffort(linearSettings.model, linearSettings.reasoningEffort)
-        ? null
-        : (linearSettings.reasoningEffort ?? null);
-
-    return json({
-      integrationId: id,
-      repo,
-      config: {
-        model: linearSettings.model ?? null,
-        reasoningEffort: linearReasoningEffort,
-        allowUserPreferenceOverride: linearSettings.allowUserPreferenceOverride ?? true,
-        allowLabelModelOverride: linearSettings.allowLabelModelOverride ?? true,
-        emitToolProgressActivities: linearSettings.emitToolProgressActivities ?? true,
-        issueSessionInstructions: linearSettings.issueSessionInstructions ?? null,
-        enabledRepos,
       },
     });
   }

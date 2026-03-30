@@ -70,47 +70,13 @@ flow with `actor=app` and installs the agent in your Linear workspace.
 
 After installation, `@OpenInspect` will appear in the mention and assignee menus.
 
-### 4. Configure Repo Mapping (Optional)
-
-The agent resolves repos automatically in most cases (see [Repo Resolution](#repo-resolution)).
-Static mappings are optional overrides. All `/config/*` endpoints require an `Authorization` header
-with an HMAC-signed bearer token (from `INTERNAL_CALLBACK_SECRET`).
-
-**Team → repo mapping:**
-
-```bash
-curl -X PUT https://<your-linear-bot-worker>/config/team-repos \
-  -H "Authorization: Bearer <token>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "YOUR_TEAM_ID": [
-      { "owner": "your-org", "name": "frontend", "label": "frontend" },
-      { "owner": "your-org", "name": "backend", "label": "backend" },
-      { "owner": "your-org", "name": "main-repo" }
-    ]
-  }'
-```
-
-Each team maps to an array of repos. If a repo has a `label`, it only matches issues with that
-label. The first repo without a label is the default fallback.
-
-**Project → repo mapping:**
-
-```bash
-curl -X PUT https://<your-linear-bot-worker>/config/project-repos \
-  -H "Authorization: Bearer <token>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "LINEAR_PROJECT_ID": { "owner": "your-org", "name": "my-repo" }
-  }'
-```
-
-Project mappings take the highest priority during repo resolution.
-
-### 5. Configure Integration Settings (Optional)
+### 4. Configure Integration Settings (Optional)
 
 In the Open-Inspect web UI, go to **Settings → Integrations → Linear** to configure:
 
+- **Repository Mapping** — map Linear teams or projects to specific GitHub repos. Project mappings
+  take priority over team mappings. Team mappings support optional label filters (e.g., map a team's
+  `backend` label to one repo and `frontend` to another).
 - Default model and reasoning effort
 - Whether users can override the model via preferences or issue labels
 - Whether real-time tool progress activities are shown in Linear
@@ -118,7 +84,7 @@ In the Open-Inspect web UI, go to **Settings → Integrations → Linear** to co
 
 These can also be set per-repo as overrides.
 
-### 6. Use It
+### 5. Use It
 
 On any Linear issue:
 
@@ -149,8 +115,8 @@ All `/config/*` endpoints require HMAC auth via `Authorization: Bearer <token>`.
 | `/webhook`                   | POST    | Linear webhook receiver                   |
 | `/oauth/authorize`           | GET     | Start OAuth installation flow             |
 | `/oauth/callback`            | GET     | OAuth callback handler                    |
-| `/config/team-repos`         | GET/PUT | Team → repo mapping                       |
-| `/config/project-repos`      | GET/PUT | Project → repo mapping                    |
+| `/config/team-repos`         | GET/PUT | Team → repo mapping (deprecated, use web UI) |
+| `/config/project-repos`      | GET/PUT | Project → repo mapping (deprecated, use web UI) |
 | `/config/user-prefs/:userId` | GET/PUT | Per-user model and reasoning preferences  |
 | `/config/triggers`           | GET/PUT | Trigger configuration (legacy)            |
 | `/callbacks/complete`        | POST    | Completion callback from control plane    |
@@ -186,5 +152,5 @@ Built on Linear's [Agents API](https://linear.app/developers/agents):
 - **AgentSessionEvent** — native trigger when users @mention or assign
 - **AgentActivity** — native status updates visible in Linear's UI
 - **Hono** for HTTP routing
-- **KV** for OAuth tokens, issue-to-session mapping, and configuration
+- **KV** for OAuth tokens and issue-to-session mapping
 - **Service binding** to the control plane for session management
