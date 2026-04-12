@@ -50,7 +50,7 @@ import type {
   SessionStatus,
   SandboxStatus,
 } from "../types";
-import type { SessionRow, ArtifactRow, SandboxRow } from "./types";
+import type { SessionRow, ArtifactRow, SandboxRow, SandboxEventWithAck } from "./types";
 import { SessionRepository } from "./repository";
 import { SessionWebSocketManagerImpl, type SessionWebSocketManager } from "./websocket-manager";
 import { SessionPullRequestService } from "./pull-request-service";
@@ -1353,7 +1353,7 @@ export class SessionDO extends DurableObject<Env> {
   /**
    * Process sandbox event.
    */
-  private async processSandboxEvent(event: SandboxEvent): Promise<void> {
+  private async processSandboxEvent(event: SandboxEventWithAck): Promise<void> {
     await this.sandboxEventProcessor.processSandboxEvent(event);
   }
 

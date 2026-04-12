@@ -1,8 +1,8 @@
 import type { Logger } from "../../../logger";
-import type { ParticipantRole, SandboxEvent } from "../../../types";
+import type { ParticipantRole } from "../../../types";
 import type { OpenAITokenRefreshResult } from "../../openai-token-refresh-service";
 import type { SessionRepository } from "../../repository";
-import type { SandboxRow, SessionRow } from "../../types";
+import type { SandboxEventWithAck, SandboxRow, SessionRow } from "../../types";
 
 interface AddParticipantRequest {
   userId: string;
@@ -14,7 +14,7 @@ interface AddParticipantRequest {
 
 export interface SandboxHandlerDeps {
   repository: Pick<SessionRepository, "createParticipant">;
-  processSandboxEvent: (event: SandboxEvent) => Promise<void>;
+  processSandboxEvent: (event: SandboxEventWithAck) => Promise<void>;
   getSandbox: () => SandboxRow | null;
   isValidSandboxToken: (token: string | null, sandbox: SandboxRow | null) => Promise<boolean>;
   getSession: () => SessionRow | null;
@@ -32,17 +32,10 @@ export interface SandboxHandler {
   openaiTokenRefresh: () => Promise<Response>;
 }
 
-function jsonResponse(body: unknown, status: number): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "Content-Type": "application/json" },
-  });
-}
-
 export function createSandboxHandler(deps: SandboxHandlerDeps): SandboxHandler {
   return {
     async sandboxEvent(request: Request): Promise<Response> {
-      const event = (await request.json()) as SandboxEvent;
+      const event = (await request.json()) as SandboxEventWithAck;
       await deps.processSandboxEvent(event);
       return Response.json({ status: "ok" });
     },
@@ -70,54 +63,54 @@ export function createSandboxHandler(deps: SandboxHandlerDeps): SandboxHandler {
       const body = (await request.json()) as { token: string };
 
       if (!body.token) {
-        return jsonResponse({ valid: false, error: "Missing token" }, 400);
+        return Response.json({ valid: false, error: "Missing token" }, { status: 400 });
       }
 
       const sandbox = deps.getSandbox();
       if (!sandbox) {
         deps.getLog().warn("Sandbox token verification failed: no sandbox");
-        return jsonResponse({ valid: false, error: "No sandbox" }, 404);
+        return Response.json({ valid: false, error: "No sandbox" }, { status: 404 });
       }
 
       if (sandbox.status === "stopped" || sandbox.status === "stale") {
         deps.getLog().warn("Sandbox token verification failed: sandbox is stopped/stale", {
           status: sandbox.status,
         });
-        return jsonResponse({ valid: false, error: "Sandbox stopped" }, 410);
+        return Response.json({ valid: false, error: "Sandbox stopped" }, { status: 410 });
       }
 
       const isTokenValid = await deps.isValidSandboxToken(body.token, sandbox);
       if (!isTokenValid) {
         deps.getLog().warn("Sandbox token verification failed: token mismatch");
-        return jsonResponse({ valid: false, error: "Invalid token" }, 401);
+        return Response.json({ valid: false, error: "Invalid token" }, { status: 401 });
       }
 
       deps.getLog().info("Sandbox token verified successfully");
-      return jsonResponse({ valid: true }, 200);
+      return Response.json({ valid: true });
     },
 
     async openaiTokenRefresh(): Promise<Response> {
       const session = deps.getSession();
       if (!session) {
-        return jsonResponse({ error: "No session" }, 404);
+        return Response.json({ error: "No session" }, { status: 404 });
       }
 
       if (!deps.isOpenAISecretsConfigured()) {
-        return jsonResponse({ error: "Secrets not configured" }, 500);
+        return Response.json({ error: "Secrets not configured" }, { status: 500 });
       }
 
       const result = await deps.refreshOpenAIToken(session);
       if (!result.ok) {
-        return jsonResponse({ error: result.error }, result.status);
+        return Response.json({ error: result.error }, { status: result.status });
       }
 
-      return jsonResponse(
+      return Response.json(
         {
           access_token: result.accessToken,
           expires_in: result.expiresIn,
           account_id: result.accountId,
         },
-        200
+        { status: 200 }
       );
     },
   };
