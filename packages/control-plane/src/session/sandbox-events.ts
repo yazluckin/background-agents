@@ -1,3 +1,4 @@
+import type { SessionArtifact } from "@open-inspect/shared";
 import { generateId } from "../auth/crypto";
 import type { Logger } from "../logger";
 import type { GitPushSpec } from "../source-control";
@@ -6,6 +7,7 @@ import { shouldPersistToolCallEvent } from "./event-persistence";
 import type { SessionRepository } from "./repository";
 import type { CallbackNotificationService } from "./callback-notification-service";
 import type { SandboxEventWithAck } from "./types";
+import { assertArtifactType } from "./artifacts";
 import type { SessionWebSocketManager } from "./websocket-manager";
 
 type PushResolver = { resolve: () => void; reject: (err: Error) => void };
@@ -47,6 +49,7 @@ export class SessionSandboxEventProcessor {
     }
     const now = Date.now();
 
+    // Extract ackId from the raw event (attached by bridge for critical events)
     const ackId = event.ackId;
 
     if (event.type === "heartbeat") {
@@ -57,6 +60,48 @@ export class SessionSandboxEventProcessor {
     const eventMessageId = "messageId" in event ? event.messageId : null;
     const processingMessage = this.deps.repository.getProcessingMessage();
     const messageId = eventMessageId ?? processingMessage?.id ?? null;
+
+    if (event.type === "artifact") {
+      this.deps.updateLastActivity(now);
+
+      const artifactType = assertArtifactType(event.artifactType);
+      const artifactId =
+        typeof event.artifactId === "string" && event.artifactId.length > 0
+          ? event.artifactId
+          : generateId();
+      const augmentedEvent: Extract<SandboxEvent, { type: "artifact" }> = {
+        ...event,
+        artifactType,
+        artifactId,
+        messageId: messageId ?? undefined,
+      };
+      const artifact: SessionArtifact = {
+        id: artifactId,
+        type: artifactType,
+        url: event.url,
+        metadata: event.metadata ?? null,
+        createdAt: now,
+      };
+
+      this.deps.repository.createArtifact({
+        id: artifact.id,
+        type: artifact.type,
+        url: artifact.url,
+        metadata: artifact.metadata ? JSON.stringify(artifact.metadata) : null,
+        createdAt: now,
+      });
+      this.deps.repository.createEvent({
+        id: generateId(),
+        type: event.type,
+        data: JSON.stringify(augmentedEvent),
+        messageId,
+        createdAt: now,
+      });
+
+      this.deps.broadcast({ type: "artifact_created", artifact });
+      this.deps.broadcast({ type: "sandbox_event", event: augmentedEvent });
+      return;
+    }
 
     if (event.type === "token") {
       if (messageId) {

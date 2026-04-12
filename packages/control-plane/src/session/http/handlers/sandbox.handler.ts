@@ -1,8 +1,10 @@
 import type { Logger } from "../../../logger";
-import type { ParticipantRole } from "../../../types";
+import type { SessionArtifact } from "@open-inspect/shared";
+import type { ParticipantRole, SandboxEvent, ServerMessage } from "../../../types";
 import type { OpenAITokenRefreshResult } from "../../openai-token-refresh-service";
 import type { SessionRepository } from "../../repository";
 import type { SandboxEventWithAck, SandboxRow, SessionRow } from "../../types";
+import { assertArtifactType } from "../../artifacts";
 
 interface AddParticipantRequest {
   userId: string;
@@ -13,20 +15,32 @@ interface AddParticipantRequest {
 }
 
 export interface SandboxHandlerDeps {
-  repository: Pick<SessionRepository, "createParticipant">;
+  repository: Pick<
+    SessionRepository,
+    "createParticipant" | "createArtifact" | "createEvent" | "getProcessingMessage"
+  >;
   processSandboxEvent: (event: SandboxEventWithAck) => Promise<void>;
   getSandbox: () => SandboxRow | null;
   isValidSandboxToken: (token: string | null, sandbox: SandboxRow | null) => Promise<boolean>;
   getSession: () => SessionRow | null;
   refreshOpenAIToken: (session: SessionRow) => Promise<OpenAITokenRefreshResult>;
   isOpenAISecretsConfigured: () => boolean;
+  broadcast: (message: ServerMessage) => void;
   generateId: () => string;
   now: () => number;
   getLog: () => Logger;
 }
 
+interface CreateMediaArtifactRequest {
+  artifactId: string;
+  artifactType: string;
+  objectKey: string;
+  metadata?: Record<string, unknown>;
+}
+
 export interface SandboxHandler {
   sandboxEvent: (request: Request) => Promise<Response>;
+  createMediaArtifact: (request: Request) => Promise<Response>;
   addParticipant: (request: Request) => Promise<Response>;
   verifySandboxToken: (request: Request) => Promise<Response>;
   openaiTokenRefresh: () => Promise<Response>;
@@ -38,6 +52,66 @@ export function createSandboxHandler(deps: SandboxHandlerDeps): SandboxHandler {
       const event = (await request.json()) as SandboxEventWithAck;
       await deps.processSandboxEvent(event);
       return Response.json({ status: "ok" });
+    },
+
+    async createMediaArtifact(request: Request): Promise<Response> {
+      const body = (await request.json()) as CreateMediaArtifactRequest;
+      const sandbox = deps.getSandbox();
+      if (!sandbox) {
+        return Response.json({ error: "No sandbox" }, { status: 404 });
+      }
+
+      if (!body.artifactId || !body.objectKey) {
+        return Response.json({ error: "artifactId and objectKey are required" }, { status: 400 });
+      }
+
+      const processingMessage = deps.repository.getProcessingMessage();
+      if (!processingMessage) {
+        return Response.json({ error: "No active prompt" }, { status: 409 });
+      }
+
+      const artifactType = assertArtifactType(body.artifactType);
+      const now = deps.now();
+      const timestampSeconds = now / 1000;
+      const artifact: SessionArtifact = {
+        id: body.artifactId,
+        type: artifactType,
+        url: body.objectKey,
+        metadata: body.metadata ?? null,
+        createdAt: now,
+      };
+
+      deps.repository.createArtifact({
+        id: artifact.id,
+        type: artifact.type,
+        url: artifact.url,
+        metadata: artifact.metadata ? JSON.stringify(artifact.metadata) : null,
+        createdAt: now,
+      });
+
+      const event: Extract<SandboxEvent, { type: "artifact" }> = {
+        type: "artifact",
+        artifactType: artifact.type,
+        artifactId: artifact.id,
+        url: body.objectKey,
+        metadata: artifact.metadata ?? undefined,
+        messageId: processingMessage.id,
+        sandboxId: sandbox.modal_sandbox_id ?? sandbox.id,
+        timestamp: timestampSeconds,
+      };
+
+      deps.repository.createEvent({
+        id: deps.generateId(),
+        type: event.type,
+        data: JSON.stringify(event),
+        messageId: processingMessage.id,
+        createdAt: now,
+      });
+
+      deps.broadcast({ type: "artifact_created", artifact });
+      deps.broadcast({ type: "sandbox_event", event });
+
+      return Response.json({ status: "ok", artifactId: artifact.id });
     },
 
     async addParticipant(request: Request): Promise<Response> {
@@ -86,7 +160,7 @@ export function createSandboxHandler(deps: SandboxHandlerDeps): SandboxHandler {
       }
 
       deps.getLog().info("Sandbox token verified successfully");
-      return Response.json({ valid: true });
+      return Response.json({ valid: true }, { status: 200 });
     },
 
     async openaiTokenRefresh(): Promise<Response> {
