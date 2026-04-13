@@ -13,7 +13,6 @@ import type {
   ThreadSession,
   UserPreferences,
   SlackInteractionPayload,
-  PendingRepoSelection,
   SlackEvent,
   SlackReactionAddedEvent,
 } from "./types";
@@ -66,12 +65,6 @@ import {
 const log = createLogger("handler");
 
 const MAX_REPO_SUGGESTION_OPTIONS = 100;
-const THREAD_SESSION_TTL_SECONDS = 86400;
-const PENDING_REPO_SELECTION_TTL_SECONDS = 3600;
-const SESSION_TITLE_LIMIT = 100;
-const THREAD_CONTEXT_LIMIT = 10;
-const REACTION_PROGRESS_NAME = "eyes";
-const NO_MESSAGE_TEXT = "[No message text available]";
 
 /**
  * Build authenticated headers for control plane requests.
@@ -255,7 +248,7 @@ async function storeThreadSession(
   try {
     const key = getThreadSessionKey(channel, threadTs);
     await env.SLACK_KV.put(key, JSON.stringify(session), {
-      expirationTtl: THREAD_SESSION_TTL_SECONDS,
+      expirationTtl: 86400, // 24 hours
     });
   } catch (e) {
     log.error("kv.put", {
@@ -281,81 +274,6 @@ async function clearThreadSession(env: Env, channel: string, threadTs: string): 
       thread_ts: threadTs,
       error: e instanceof Error ? e : new Error(String(e)),
     });
-  }
-}
-
-function getPendingRepoSelectionKey(channel: string, threadTsOrMessageTs: string): string {
-  return `pending:${channel}:${threadTsOrMessageTs}`;
-}
-
-function getInvestigateReactionConfig(env: Env, traceId?: string): string | null {
-  const reaction = env.SLACK_INVESTIGATE_REACTION?.trim();
-
-  if (!reaction) {
-    log.error("slack.reaction.config.invalid", {
-      trace_id: traceId,
-      has_reaction: Boolean(reaction),
-    });
-    return null;
-  }
-
-  return reaction;
-}
-
-type SessionLookupOutcome = "active" | "missing" | "error";
-
-async function getSessionLookupOutcome(
-  env: Env,
-  sessionId: string,
-  traceId?: string
-): Promise<SessionLookupOutcome> {
-  const startTime = Date.now();
-  try {
-    const headers = await getAuthHeaders(env, traceId);
-    const response = await env.CONTROL_PLANE.fetch(`https://internal/sessions/${sessionId}`, {
-      method: "GET",
-      headers,
-    });
-
-    if (response.status === 404) {
-      log.warn("control_plane.get_session", {
-        trace_id: traceId,
-        session_id: sessionId,
-        outcome: "missing",
-        http_status: 404,
-        duration_ms: Date.now() - startTime,
-      });
-      return "missing";
-    }
-
-    if (!response.ok) {
-      log.error("control_plane.get_session", {
-        trace_id: traceId,
-        session_id: sessionId,
-        outcome: "error",
-        http_status: response.status,
-        duration_ms: Date.now() - startTime,
-      });
-      return "error";
-    }
-
-    log.info("control_plane.get_session", {
-      trace_id: traceId,
-      session_id: sessionId,
-      outcome: "success",
-      http_status: 200,
-      duration_ms: Date.now() - startTime,
-    });
-    return "active";
-  } catch (error) {
-    log.error("control_plane.get_session", {
-      trace_id: traceId,
-      session_id: sessionId,
-      outcome: "error",
-      error: error instanceof Error ? error : new Error(String(error)),
-      duration_ms: Date.now() - startTime,
-    });
-    return "error";
   }
 }
 
@@ -914,26 +832,8 @@ function buildThreadSession(
 }
 
 /**
- * Normalize Slack message text for prompt construction.
- */
-function normalizeSlackMessageText(text?: string): string {
-  const trimmed = text?.trim();
-  if (!trimmed) {
-    return NO_MESSAGE_TEXT;
-  }
-  return trimmed;
-}
-
-/**
- * Build a short session title from Slack content.
- */
-function buildSlackSessionTitle(prefix: string, text: string): string {
-  const trimmed = normalizeSlackMessageText(text);
-  return `${prefix}: ${trimmed}`.slice(0, SESSION_TITLE_LIMIT);
-}
-
-/**
  * Format thread context for inclusion in a prompt.
+ * Returns a formatted string with previous messages from the thread.
  */
 function formatThreadContext(previousMessages: string[]): string {
   if (previousMessages.length === 0) {
@@ -946,6 +846,7 @@ function formatThreadContext(previousMessages: string[]): string {
 
 /**
  * Format channel context for inclusion in a prompt.
+ * Returns a formatted string with the channel name and optional description.
  */
 function formatChannelContext(channelName: string, channelDescription?: string): string {
   let context = `Slack channel context:\n---\nChannel: #${channelName}`;
@@ -957,68 +858,26 @@ function formatChannelContext(channelName: string, channelDescription?: string):
 }
 
 /**
- * Build prompt content from channel/thread context plus the user's message.
+ * Create a session and send the initial prompt.
+ * Shared logic between handleAppMention and handleRepoSelection.
+ *
+ * @returns Object containing sessionId if successful, null if session creation or prompt failed
  */
-function buildPromptContent(
+async function startSessionAndSendPrompt(
+  env: Env,
+  repo: RepoConfig,
+  channel: string,
+  threadTs: string,
   messageText: string,
+  userId: string,
   previousMessages?: string[],
   channelName?: string,
-  channelDescription?: string
-): string {
-  const channelContext = channelName ? formatChannelContext(channelName, channelDescription) : "";
-  const threadContext = previousMessages ? formatThreadContext(previousMessages) : "";
-  return channelContext + threadContext + normalizeSlackMessageText(messageText);
-}
-
-/**
- * Build the Slack investigation prompt for reaction-triggered alerts.
- */
-function buildInvestigationPrompt(params: {
-  channelId: string;
-  channelName?: string;
-  triggeringUserName: string;
-  primaryAlertText: string;
-  reactedReplyText?: string;
-  previousMessages?: string[];
-}): string {
-  const channelLabel = params.channelName ? `#${params.channelName}` : params.channelId;
-  const sections = [
-    "Investigate the Slack alert below.",
-    "",
-    `Channel: ${channelLabel}`,
-    `Triggered by: ${params.triggeringUserName}`,
-    "",
-    "Primary alert message:",
-    normalizeSlackMessageText(params.primaryAlertText),
-  ];
-
-  if (params.reactedReplyText) {
-    sections.push("", "Reacted thread reply:", normalizeSlackMessageText(params.reactedReplyText));
-  }
-
-  if (params.previousMessages?.length) {
-    sections.push("", "Thread context:", params.previousMessages.join("\n"));
-  }
-
-  sections.push(
-    "",
-    "Please investigate the likely cause, summarize your findings, and propose or implement a fix if the repository and evidence make that appropriate."
-  );
-
-  return sections.join("\n");
-}
-
-interface UserSessionSettings {
-  model: string;
-  reasoningEffort?: string;
-  branch?: string;
-}
-
-async function getUserSessionSettings(
-  env: Env,
-  userId: string,
-  repoId: string
-): Promise<UserSessionSettings> {
+  channelDescription?: string,
+  traceId?: string,
+  title?: string,
+  reactionMessageTs?: string
+): Promise<{ sessionId: string } | null> {
+  // Fetch user's preferred model and reasoning effort
   const userPrefs = await getUserPreferences(env, userId);
   const fallback = env.DEFAULT_MODEL || DEFAULT_MODEL;
   const model = getValidModelOrDefault(userPrefs?.model ?? fallback);
@@ -1027,70 +886,17 @@ async function getUserSessionSettings(
       ? userPrefs.reasoningEffort
       : getDefaultReasoningEffort(model);
   const globalBranch = getValidatedBranch(userPrefs?.branch);
-  const repoBranch = await getUserRepoBranchPreference(env, userId, repoId);
-  return {
-    model,
-    reasoningEffort,
-    branch: repoBranch ?? globalBranch,
-  };
-}
+  const repoBranch = await getUserRepoBranchPreference(env, userId, repo.id);
+  const branch = repoBranch ?? globalBranch;
 
-function buildSlackCallbackContext(params: {
-  channel: string;
-  threadTs: string;
-  repoFullName: string;
-  model: string;
-  reasoningEffort?: string;
-  reactionMessageTs?: string;
-}): CallbackContext {
-  return {
-    source: "slack",
-    channel: params.channel,
-    threadTs: params.threadTs,
-    repoFullName: params.repoFullName,
-    model: params.model,
-    reasoningEffort: params.reasoningEffort,
-    reactionMessageTs: params.reactionMessageTs,
-  };
-}
-
-interface CreateSlackSessionAndPromptParams {
-  env: Env;
-  repo: RepoConfig;
-  channel: string;
-  threadTs: string;
-  sessionTitle: string;
-  promptContent: string;
-  userId: string;
-  reactionMessageTs?: string;
-  traceId?: string;
-}
-
-/**
- * Create a Slack-backed session, store the thread mapping, and enqueue the prompt.
- */
-async function createSlackSessionAndSendPrompt(
-  params: CreateSlackSessionAndPromptParams
-): Promise<{ sessionId: string } | null> {
-  const {
-    env,
-    repo,
-    channel,
-    threadTs,
-    sessionTitle,
-    promptContent,
-    userId,
-    reactionMessageTs,
-    traceId,
-  } = params;
-  const userSessionSettings = await getUserSessionSettings(env, userId, repo.id);
+  // Create session via control plane with user's preferred model, reasoning effort, and branch
   const session = await createSession(
     env,
     repo,
-    sessionTitle,
-    userSessionSettings.model,
-    userSessionSettings.reasoningEffort,
-    userSessionSettings.branch,
+    title || messageText.slice(0, 100),
+    model,
+    reasoningEffort,
+    branch,
     traceId
   );
 
@@ -1108,23 +914,26 @@ async function createSlackSessionAndSendPrompt(
     env,
     channel,
     threadTs,
-    buildThreadSession(
-      session.sessionId,
-      repo,
-      userSessionSettings.model,
-      userSessionSettings.reasoningEffort
-    )
+    buildThreadSession(session.sessionId, repo, model, reasoningEffort)
   );
 
-  const callbackContext = buildSlackCallbackContext({
+  // Build callback context for follow-up notification
+  const callbackContext: CallbackContext = {
+    source: "slack",
     channel,
     threadTs,
     repoFullName: repo.fullName,
-    model: userSessionSettings.model,
-    reasoningEffort: userSessionSettings.reasoningEffort,
+    model,
+    reasoningEffort,
     reactionMessageTs,
-  });
+  };
 
+  // Build prompt content with channel and thread context if available
+  const channelContext = channelName ? formatChannelContext(channelName, channelDescription) : "";
+  const threadContext = previousMessages ? formatThreadContext(previousMessages) : "";
+  const promptContent = channelContext + threadContext + messageText;
+
+  // Send the prompt to the session
   const promptResult = await sendPrompt(
     env,
     session.sessionId,
@@ -1145,79 +954,6 @@ async function createSlackSessionAndSendPrompt(
   }
 
   return { sessionId: session.sessionId };
-}
-
-/**
- * Post the initial "working on it" acknowledgement to Slack.
- */
-async function postWorkingAckMessage(
-  env: Env,
-  channel: string,
-  threadTs: string,
-  repoFullName: string,
-  reasoning: string
-): Promise<string | undefined> {
-  const ackResult = await postMessage(
-    env.SLACK_BOT_TOKEN,
-    channel,
-    `Working on *${repoFullName}*...`,
-    {
-      thread_ts: threadTs,
-      blocks: [
-        {
-          type: "section",
-          text: {
-            type: "mrkdwn",
-            text: `Working on *${repoFullName}*...\n_${reasoning}_`,
-          },
-        },
-      ],
-    }
-  );
-
-  return ackResult.ts;
-}
-
-/**
- * Update the acknowledgement message with a session link.
- */
-async function updateWorkingAckMessage(
-  env: Env,
-  channel: string,
-  ackTs: string | undefined,
-  repoFullName: string,
-  reasoning: string,
-  sessionId: string
-): Promise<void> {
-  if (!ackTs) {
-    return;
-  }
-
-  await updateMessage(env.SLACK_BOT_TOKEN, channel, ackTs, `Working on *${repoFullName}*...`, {
-    blocks: [
-      {
-        type: "section",
-        text: {
-          type: "mrkdwn",
-          text: `Working on *${repoFullName}*...\n_${reasoning}_`,
-        },
-      },
-      {
-        type: "actions",
-        elements: [
-          {
-            type: "button",
-            text: {
-              type: "plain_text",
-              text: "View Session",
-            },
-            url: `${env.WEB_APP_URL}/session/${sessionId}`,
-            action_id: "view_session",
-          },
-        ],
-      },
-    ],
-  });
 }
 
 /**
@@ -1465,7 +1201,7 @@ async function handleSlackEvent(payload: SlackEvent, env: Env, traceId?: string)
   }
 
   if (event.type === "reaction_added") {
-    await handleReactionAddedEvent(event as SlackReactionAddedEvent, env, traceId);
+    await handleReactionAdded(event as SlackReactionAddedEvent, env, traceId);
     return;
   }
 
@@ -1493,287 +1229,141 @@ async function handleSlackEvent(payload: SlackEvent, env: Env, traceId?: string)
   }
 }
 
-async function fetchChannelContext(
+/**
+ * Handle reaction_added events. When the configured investigation reaction is added
+ * to a message, classify the repo and start an investigation session.
+ */
+async function handleReactionAdded(
+  event: SlackReactionAddedEvent,
   env: Env,
-  channelId: string
-): Promise<{ channelName?: string; channelDescription?: string }> {
-  try {
-    const channelInfo = await getChannelInfo(env.SLACK_BOT_TOKEN, channelId);
-    if (!channelInfo.ok || !channelInfo.channel) {
-      return {};
-    }
-
-    return {
-      channelName: channelInfo.channel.name,
-      channelDescription: channelInfo.channel.topic?.value || channelInfo.channel.purpose?.value,
-    };
-  } catch {
-    return {};
-  }
-}
-
-async function fetchFormattedThreadMessages(
-  env: Env,
-  channel: string,
-  threadTs: string,
-  excludeTs?: string
-): Promise<string[] | undefined> {
-  try {
-    const threadResult = await getThreadMessages(
-      env.SLACK_BOT_TOKEN,
-      channel,
-      threadTs,
-      THREAD_CONTEXT_LIMIT + 1
-    );
-    if (!threadResult.ok || !threadResult.messages) {
-      return undefined;
-    }
-
-    const filtered = excludeTs
-      ? threadResult.messages.filter((message) => message.ts !== excludeTs)
-      : threadResult.messages;
-
-    if (filtered.length === 0) {
-      return undefined;
-    }
-
-    const uniqueUserIds = [
-      ...new Set(filtered.map((message) => message.user).filter(Boolean)),
-    ] as string[];
-    const userNames = await resolveUserNames(env.SLACK_BOT_TOKEN, uniqueUserIds);
-    return filtered
-      .map((message) => {
-        if (message.bot_id) {
-          return `[Bot]: ${normalizeSlackMessageText(message.text)}`;
-        }
-        const name = message.user ? userNames.get(message.user) || message.user : "Unknown";
-        return `[${name}]: ${normalizeSlackMessageText(message.text)}`;
-      })
-      .slice(-THREAD_CONTEXT_LIMIT);
-  } catch {
-    return undefined;
-  }
-}
-
-function buildRepoSelectionOptions(repos: RepoConfig[]): Array<{
-  text: { type: "plain_text"; text: string };
-  description: { type: "plain_text"; text: string };
-  value: string;
-}> {
-  return repos.map((repo) => ({
-    text: {
-      type: "plain_text" as const,
-      text: repo.displayName,
-    },
-    description: {
-      type: "plain_text" as const,
-      text: repo.description.slice(0, 75),
-    },
-    value: repo.id,
-  }));
-}
-
-async function storePendingRepoSelection(
-  env: Env,
-  channel: string,
-  threadTsOrMessageTs: string,
-  payload: PendingRepoSelection
-): Promise<void> {
-  await env.SLACK_KV.put(
-    getPendingRepoSelectionKey(channel, threadTsOrMessageTs),
-    JSON.stringify(payload),
-    { expirationTtl: PENDING_REPO_SELECTION_TTL_SECONDS }
-  );
-}
-
-function isPendingRepoSelection(data: unknown): data is PendingRepoSelection {
-  if (!data || typeof data !== "object" || Array.isArray(data)) {
-    return false;
-  }
-
-  const record = data as Record<string, unknown>;
-  if (record.kind === "message") {
-    return typeof record.message === "string" && typeof record.userId === "string";
-  }
-
-  if (record.kind === "reaction") {
-    return (
-      typeof record.userId === "string" &&
-      typeof record.promptContent === "string" &&
-      typeof record.sessionTitle === "string" &&
-      typeof record.reactionMessageTs === "string" &&
-      typeof record.rootThreadTs === "string"
-    );
-  }
-
-  return false;
-}
-
-async function postRepoSelectionMessage(
-  env: Env,
-  channel: string,
-  threadTs: string,
-  reasoning: string,
-  repos: RepoConfig[]
-): Promise<void> {
-  await postMessage(
-    env.SLACK_BOT_TOKEN,
-    channel,
-    `I couldn't determine which repository you're referring to. ${reasoning}`,
-    {
-      thread_ts: threadTs,
-      blocks: [
-        {
-          type: "section",
-          text: {
-            type: "mrkdwn",
-            text: `I couldn't determine which repository you're referring to.\n\n_${reasoning}_`,
-          },
-        },
-        {
-          type: "section",
-          text: {
-            type: "mrkdwn",
-            text: "Which repository should I work with?",
-          },
-          accessory: {
-            type: "static_select",
-            placeholder: {
-              type: "plain_text",
-              text: "Select a repository",
-            },
-            options: buildRepoSelectionOptions(repos),
-            action_id: "select_repo",
-          },
-        },
-      ],
-    }
-  );
-}
-
-async function addProgressReaction(
-  env: Env,
-  channel: string,
-  messageTs: string,
   traceId?: string
 ): Promise<void> {
-  const reactionResult = await addReaction(
-    env.SLACK_BOT_TOKEN,
-    channel,
-    messageTs,
-    REACTION_PROGRESS_NAME
-  );
-  if (!reactionResult.ok && reactionResult.error !== "already_reacted") {
-    log.warn("slack.reaction.add", {
-      trace_id: traceId,
-      channel,
-      message_ts: messageTs,
-      reaction: REACTION_PROGRESS_NAME,
-      slack_error: reactionResult.error,
-    });
-  }
-}
-
-/**
- * Shared tail: ack → create session → update ack with link → react → notify.
- */
-interface StartSessionParams {
-  env: Env;
-  channel: string;
-  threadTs: string;
-  userId: string;
-  traceId?: string;
-  repo: RepoConfig;
-  reasoning: string;
-  promptContent: string;
-  sessionTitle: string;
-  reactionMessageTs?: string;
-}
-
-async function startSession(params: StartSessionParams): Promise<void> {
-  const {
-    env,
-    channel,
-    threadTs,
-    userId,
-    traceId,
-    repo,
-    reasoning,
-    promptContent,
-    sessionTitle,
-    reactionMessageTs,
-  } = params;
-
-  const ackTs = await postWorkingAckMessage(env, channel, threadTs, repo.fullName, reasoning);
-  const sessionResult = await createSlackSessionAndSendPrompt({
-    env,
-    repo,
-    channel,
-    threadTs,
-    sessionTitle,
-    promptContent,
-    userId,
-    reactionMessageTs,
-    traceId,
-  });
-
-  if (!sessionResult) {
+  const configuredReaction = env.SLACK_INVESTIGATE_REACTION?.trim();
+  if (!configuredReaction || event.reaction !== configuredReaction) {
     return;
   }
 
-  await updateWorkingAckMessage(
-    env,
-    channel,
-    ackTs,
-    repo.fullName,
-    reasoning,
-    sessionResult.sessionId
-  );
-  if (reactionMessageTs) {
-    await addProgressReaction(env, channel, reactionMessageTs, traceId);
+  if (event.item?.type !== "message" || !event.item.channel || !event.item.ts || !event.user) {
+    return;
   }
-  await postSessionStartedMessage(env, channel, threadTs, sessionResult.sessionId);
-}
 
-/**
- * Shared orchestration: classify the repo, then either ask for clarification
- * (storing a pending selection) or start a session.
- */
-interface ClassifyAndStartSessionParams extends StartSessionParams {
-  classificationText: string;
-  pendingSelection: PendingRepoSelection;
-  channelName?: string;
-  channelDescription?: string;
-  previousMessages?: string[];
-}
+  const channel = event.item.channel;
+  const reactionMessageTs = event.item.ts;
 
-async function classifyAndStartSession(
-  params: Omit<ClassifyAndStartSessionParams, "repo" | "reasoning">
-): Promise<void> {
-  const {
-    env,
+  // Fetch the reacted message to get its text and thread context
+  const messageResult = await getMessageByTimestamp(
+    env.SLACK_BOT_TOKEN,
     channel,
-    threadTs,
-    userId,
-    traceId,
-    classificationText,
-    promptContent,
-    sessionTitle,
-    pendingSelection,
-    channelName,
-    channelDescription,
-    previousMessages,
-    reactionMessageTs,
-  } = params;
+    reactionMessageTs
+  );
+  if (!messageResult.ok || !messageResult.message) {
+    log.warn("slack.reaction.message_fetch_failed", {
+      trace_id: traceId,
+      channel,
+      message_ts: reactionMessageTs,
+      slack_error: messageResult.error,
+    });
+    return;
+  }
 
+  const rootThreadTs = messageResult.message.thread_ts ?? messageResult.message.ts;
+
+  // Skip if there's already an active session for this thread
+  const existingSession = await lookupThreadSession(env, channel, rootThreadTs);
+  if (existingSession) {
+    try {
+      const headers = await getAuthHeaders(env, traceId);
+      const resp = await env.CONTROL_PLANE.fetch(
+        `https://internal/sessions/${existingSession.sessionId}`,
+        { method: "GET", headers }
+      );
+      if (resp.ok) {
+        await postMessage(
+          env.SLACK_BOT_TOKEN,
+          channel,
+          `An investigation already exists for this alert.\n\nView progress: ${env.WEB_APP_URL}/session/${existingSession.sessionId}`,
+          { thread_ts: rootThreadTs }
+        );
+        return;
+      }
+      if (resp.status !== 404) {
+        return;
+      }
+    } catch {
+      return;
+    }
+    await clearThreadSession(env, channel, rootThreadTs);
+  }
+
+  // Gather context
+  const alertText = messageResult.message.text?.trim() || "[No message text]";
+  let channelName: string | undefined;
+  let channelDescription: string | undefined;
+  try {
+    const info = await getChannelInfo(env.SLACK_BOT_TOKEN, channel);
+    if (info.ok && info.channel) {
+      channelName = info.channel.name;
+      channelDescription = info.channel.topic?.value || info.channel.purpose?.value;
+    }
+  } catch {
+    // Channel info not available
+  }
+
+  let previousMessages: string[] | undefined;
+  try {
+    const threadResult = await getThreadMessages(env.SLACK_BOT_TOKEN, channel, rootThreadTs, 11);
+    if (threadResult.ok && threadResult.messages) {
+      const filtered = threadResult.messages.filter((m) => m.ts !== reactionMessageTs);
+      if (filtered.length > 0) {
+        const userIds = [...new Set(filtered.map((m) => m.user).filter(Boolean))] as string[];
+        const names = await resolveUserNames(env.SLACK_BOT_TOKEN, userIds);
+        previousMessages = filtered
+          .map((m) => {
+            if (m.bot_id) return `[Bot]: ${m.text?.trim() || ""}`;
+            const name = m.user ? names.get(m.user) || m.user : "Unknown";
+            return `[${name}]: ${m.text?.trim() || ""}`;
+          })
+          .slice(-10);
+      }
+    }
+  } catch {
+    // Thread context not available
+  }
+
+  // Build investigation prompt
+  const triggerNames = await resolveUserNames(env.SLACK_BOT_TOKEN, [event.user]);
+  const triggerName = triggerNames.get(event.user) || event.user;
+  const channelLabel = channelName ? `#${channelName}` : channel;
+  const promptParts = [
+    "Investigate the Slack alert below.",
+    "",
+    `Channel: ${channelLabel}`,
+    `Triggered by: ${triggerName}`,
+    "",
+    "Primary alert message:",
+    alertText,
+  ];
+  if (messageResult.message.thread_ts) {
+    promptParts.push("", "Reacted thread reply:", alertText);
+  }
+  if (previousMessages?.length) {
+    promptParts.push("", "Thread context:", previousMessages.join("\n"));
+  }
+  promptParts.push(
+    "",
+    "Please investigate the likely cause, summarize your findings, and propose or implement a fix if the repository and evidence make that appropriate."
+  );
+  const promptContent = promptParts.join("\n");
+
+  // Classify repo
   const classifier = createClassifier(env);
   const result = await classifier.classify(
-    classificationText,
+    alertText,
     {
       channelId: channel,
       channelName,
       channelDescription,
-      threadTs,
+      threadTs: rootThreadTs,
       previousMessages,
     },
     traceId
@@ -1786,181 +1376,90 @@ async function classifyAndStartSession(
         env.SLACK_BOT_TOKEN,
         channel,
         "Sorry, no repositories are currently available. Please check that the GitHub App is installed and configured.",
-        { thread_ts: threadTs }
-      );
-      return;
-    }
-
-    const repoOptions = result.alternatives?.length
-      ? result.alternatives.slice(0, 5)
-      : repos.slice(0, 5);
-    await storePendingRepoSelection(env, channel, threadTs, pendingSelection);
-    await postRepoSelectionMessage(
-      env,
-      channel,
-      threadTs,
-      result.reasoning,
-      repoOptions.length > 0 ? repoOptions : repos.slice(0, 5)
-    );
-    return;
-  }
-
-  await startSession({
-    env,
-    channel,
-    threadTs,
-    userId,
-    traceId,
-    repo: result.repo,
-    reasoning: result.reasoning,
-    promptContent,
-    sessionTitle,
-    reactionMessageTs,
-  });
-}
-
-function logIgnoredInvestigateReaction(
-  reason: string,
-  event: Partial<SlackReactionAddedEvent>,
-  traceId?: string
-): void {
-  log.info("slack.reaction.investigate.ignored", {
-    trace_id: traceId,
-    reason,
-    reaction: event.reaction,
-    channel: event.item?.channel,
-    message_ts: event.item?.ts,
-    user: event.user,
-  });
-}
-
-async function handleReactionAddedEvent(
-  event: SlackReactionAddedEvent,
-  env: Env,
-  traceId?: string
-): Promise<void> {
-  const config = getInvestigateReactionConfig(env, traceId);
-  if (!config) {
-    return;
-  }
-
-  if (event.reaction !== config) {
-    logIgnoredInvestigateReaction("unsupported_reaction", event, traceId);
-    return;
-  }
-
-  if (event.item?.type !== "message") {
-    logIgnoredInvestigateReaction("unsupported_item_type", event, traceId);
-    return;
-  }
-
-  if (!event.item.channel || !event.item.ts || !event.user) {
-    logIgnoredInvestigateReaction("missing_event_fields", event, traceId);
-    return;
-  }
-
-  const channel = event.item.channel;
-  const reactionMessageTs = event.item.ts;
-  log.info("slack.reaction.investigate.accepted", {
-    trace_id: traceId,
-    channel,
-    message_ts: reactionMessageTs,
-    reaction: event.reaction,
-    user: event.user,
-  });
-
-  const messageResult = await getMessageByTimestamp(
-    env.SLACK_BOT_TOKEN,
-    channel,
-    reactionMessageTs
-  );
-  if (!messageResult.ok) {
-    log.error("slack.reaction.message_fetch", {
-      trace_id: traceId,
-      channel,
-      message_ts: reactionMessageTs,
-      outcome: "error",
-      slack_error: messageResult.error,
-    });
-    return;
-  }
-
-  if (!messageResult.message) {
-    log.warn("slack.reaction.message_fetch", {
-      trace_id: traceId,
-      channel,
-      message_ts: reactionMessageTs,
-      outcome: "missing",
-    });
-    return;
-  }
-
-  const rootThreadTs = messageResult.message.thread_ts ?? messageResult.message.ts;
-  const existingSession = await lookupThreadSession(env, channel, rootThreadTs);
-  if (existingSession) {
-    const outcome = await getSessionLookupOutcome(env, existingSession.sessionId, traceId);
-    if (outcome === "active") {
-      await postMessage(
-        env.SLACK_BOT_TOKEN,
-        channel,
-        `An investigation already exists for this alert.\n\nView progress: ${env.WEB_APP_URL}/session/${existingSession.sessionId}`,
         { thread_ts: rootThreadTs }
       );
       return;
     }
 
-    if (outcome === "error") {
-      return;
-    }
+    // Store pre-built prompt so handleRepoSelection can use it directly
+    const pendingKey = `pending:${channel}:${rootThreadTs}`;
+    await env.SLACK_KV.put(
+      pendingKey,
+      JSON.stringify({
+        userId: event.user,
+        promptContent,
+        reactionMessageTs,
+      }),
+      { expirationTtl: 3600 }
+    );
 
-    await clearThreadSession(env, channel, rootThreadTs);
+    const repoOptions = (result.alternatives || repos.slice(0, 5)).map((r) => ({
+      text: { type: "plain_text" as const, text: r.displayName },
+      description: { type: "plain_text" as const, text: r.description.slice(0, 75) },
+      value: r.id,
+    }));
+    await postMessage(
+      env.SLACK_BOT_TOKEN,
+      channel,
+      `I couldn't determine which repository you're referring to. ${result.reasoning}`,
+      {
+        thread_ts: rootThreadTs,
+        blocks: [
+          {
+            type: "section",
+            text: {
+              type: "mrkdwn",
+              text: `I couldn't determine which repository you're referring to.\n\n_${result.reasoning}_`,
+            },
+          },
+          {
+            type: "section",
+            text: { type: "mrkdwn", text: "Which repository should I work with?" },
+            accessory: {
+              type: "static_select",
+              placeholder: { type: "plain_text", text: "Select a repository" },
+              options: repoOptions,
+              action_id: "select_repo",
+            },
+          },
+        ],
+      }
+    );
+    return;
   }
 
-  const { channelName, channelDescription } = await fetchChannelContext(env, channel);
-  const previousMessages = await fetchFormattedThreadMessages(
+  // Start session with the investigation prompt
+  const sessionTitle = `Slack alert: ${alertText}`.slice(0, 100);
+  const sessionResult = await startSessionAndSendPrompt(
     env,
+    result.repo,
     channel,
     rootThreadTs,
+    promptContent,
+    event.user,
+    undefined, // context already baked into promptContent
+    undefined,
+    undefined,
+    traceId,
+    sessionTitle,
     reactionMessageTs
   );
-  const userNames = await resolveUserNames(env.SLACK_BOT_TOKEN, [event.user]);
-  const triggeringUserName = userNames.get(event.user) || event.user;
-  const primaryAlertText = normalizeSlackMessageText(messageResult.message.text);
-  const reactedReplyText = messageResult.message.thread_ts
-    ? normalizeSlackMessageText(messageResult.message.text)
-    : undefined;
-  const promptContent = buildInvestigationPrompt({
-    channelId: channel,
-    channelName,
-    triggeringUserName,
-    primaryAlertText,
-    reactedReplyText,
-    previousMessages,
-  });
-  const sessionTitle = buildSlackSessionTitle("Slack alert", primaryAlertText);
 
-  await classifyAndStartSession({
-    env,
-    channel,
-    threadTs: rootThreadTs,
-    userId: event.user,
-    traceId,
-    classificationText: primaryAlertText,
-    promptContent,
-    sessionTitle,
-    pendingSelection: {
-      kind: "reaction",
-      userId: event.user,
-      promptContent,
-      sessionTitle,
-      reactionMessageTs,
-      rootThreadTs,
-    },
-    channelName,
-    channelDescription,
-    previousMessages,
-    reactionMessageTs,
-  });
+  if (!sessionResult) {
+    return;
+  }
+
+  // Add eyes reaction to the original message and notify
+  const reactionResult = await addReaction(env.SLACK_BOT_TOKEN, channel, reactionMessageTs, "eyes");
+  if (!reactionResult.ok && reactionResult.error !== "already_reacted") {
+    log.warn("slack.reaction.add_failed", {
+      trace_id: traceId,
+      channel,
+      message_ts: reactionMessageTs,
+      slack_error: reactionResult.error,
+    });
+  }
+  await postSessionStartedMessage(env, channel, rootThreadTs, sessionResult.sessionId);
 }
 
 /**
@@ -2002,7 +1501,7 @@ async function handleIncomingMessage(params: IncomingMessageParams): Promise<voi
     traceId,
   } = params;
 
-  if (!messageText.trim()) {
+  if (!messageText) {
     await postMessage(
       env.SLACK_BOT_TOKEN,
       channel,
@@ -2012,27 +1511,49 @@ async function handleIncomingMessage(params: IncomingMessageParams): Promise<voi
     return;
   }
 
-  const previousMessages = threadTs
-    ? await fetchFormattedThreadMessages(env, channel, threadTs, ts)
-    : undefined;
+  // Get thread context if in a thread (include bot messages for better context)
+  // Fetched early so it's available for both existing session prompts and new sessions
+  let previousMessages: string[] | undefined;
+  if (threadTs) {
+    try {
+      const threadResult = await getThreadMessages(env.SLACK_BOT_TOKEN, channel, threadTs, 10);
+      if (threadResult.ok && threadResult.messages) {
+        const filtered = threadResult.messages.filter((m) => m.ts !== ts);
+        // Resolve unique user IDs to display names for attribution
+        const uniqueUserIds = [...new Set(filtered.map((m) => m.user).filter(Boolean))] as string[];
+        const userNames = await resolveUserNames(env.SLACK_BOT_TOKEN, uniqueUserIds);
+        previousMessages = filtered
+          .map((m) => {
+            if (m.bot_id) return `[Bot]: ${m.text}`;
+            const name = m.user ? userNames.get(m.user) || m.user : "Unknown";
+            return `[${name}]: ${m.text}`;
+          })
+          .slice(-10);
+      }
+    } catch {
+      // Thread messages not available
+    }
+  }
 
+  // Check for existing session in this thread
   if (threadTs) {
     const existingSession = await lookupThreadSession(env, channel, threadTs);
     if (existingSession) {
-      const callbackContext = buildSlackCallbackContext({
+      const callbackContext: CallbackContext = {
+        source: "slack",
         channel,
         threadTs,
         repoFullName: existingSession.repoFullName,
         model: existingSession.model,
         reasoningEffort: existingSession.reasoningEffort,
         reactionMessageTs: ts,
-      });
-      const promptContent = buildPromptContent(
-        messageText,
-        previousMessages,
-        channelName,
-        channelDescription
-      );
+      };
+
+      const channelContext = channelName
+        ? formatChannelContext(channelName, channelDescription)
+        : "";
+      const threadContext = previousMessages ? formatThreadContext(previousMessages) : "";
+      const promptContent = channelContext + threadContext + messageText;
 
       const promptResult = await sendPrompt(
         env,
@@ -2044,7 +1565,16 @@ async function handleIncomingMessage(params: IncomingMessageParams): Promise<voi
       );
 
       if (promptResult) {
-        await addProgressReaction(env, channel, ts, traceId);
+        const reactionResult = await addReaction(env.SLACK_BOT_TOKEN, channel, ts, "eyes");
+        if (!reactionResult.ok && reactionResult.error !== "already_reacted") {
+          log.warn("slack.reaction.add", {
+            trace_id: traceId,
+            channel,
+            message_ts: ts,
+            reaction: "eyes",
+            slack_error: reactionResult.error,
+          });
+        }
         return;
       }
 
@@ -2058,34 +1588,172 @@ async function handleIncomingMessage(params: IncomingMessageParams): Promise<voi
     }
   }
 
-  const threadKey = threadTs || ts;
-
-  await classifyAndStartSession({
-    env,
-    channel,
-    threadTs: threadKey,
-    userId: user,
-    traceId,
-    classificationText: messageText,
-    promptContent: buildPromptContent(
-      messageText,
-      previousMessages,
-      channelName,
-      channelDescription
-    ),
-    sessionTitle: buildSlackSessionTitle("Slack", messageText),
-    pendingSelection: {
-      kind: "message",
-      message: messageText,
-      userId: user,
-      previousMessages,
+  // Classify the repository
+  const classifier = createClassifier(env);
+  const result = await classifier.classify(
+    messageText,
+    {
+      channelId: channel,
       channelName,
       channelDescription,
+      threadTs,
+      previousMessages,
     },
+    traceId
+  );
+
+  // Post initial response
+  if (result.needsClarification || !result.repo) {
+    // Need to clarify which repo
+    const repos = await getAvailableRepos(env, traceId);
+
+    if (repos.length === 0) {
+      await postMessage(
+        env.SLACK_BOT_TOKEN,
+        channel,
+        "Sorry, no repositories are currently available. Please check that the GitHub App is installed and configured.",
+        { thread_ts: threadTs || ts }
+      );
+      return;
+    }
+
+    // Store original message in KV for later retrieval when user selects a repo
+    const pendingKey = `pending:${channel}:${threadTs || ts}`;
+    await env.SLACK_KV.put(
+      pendingKey,
+      JSON.stringify({
+        message: messageText,
+        userId: user,
+        previousMessages,
+        channelName,
+        channelDescription,
+      }),
+      { expirationTtl: 3600 } // Expire after 1 hour
+    );
+
+    // Build repo selection message
+    const repoOptions = (result.alternatives || repos.slice(0, 5)).map((r) => ({
+      text: {
+        type: "plain_text" as const,
+        text: r.displayName,
+      },
+      description: {
+        type: "plain_text" as const,
+        text: r.description.slice(0, 75),
+      },
+      value: r.id,
+    }));
+
+    await postMessage(
+      env.SLACK_BOT_TOKEN,
+      channel,
+      `I couldn't determine which repository you're referring to. ${result.reasoning}`,
+      {
+        thread_ts: threadTs || ts,
+        blocks: [
+          {
+            type: "section",
+            text: {
+              type: "mrkdwn",
+              text: `I couldn't determine which repository you're referring to.\n\n_${result.reasoning}_`,
+            },
+          },
+          {
+            type: "section",
+            text: {
+              type: "mrkdwn",
+              text: "Which repository should I work with?",
+            },
+            accessory: {
+              type: "static_select",
+              placeholder: {
+                type: "plain_text",
+                text: "Select a repository",
+              },
+              options: repoOptions,
+              action_id: "select_repo",
+            },
+          },
+        ],
+      }
+    );
+    return;
+  }
+
+  // We have a confident repo match - acknowledge and start session
+  const { repo } = result;
+  const threadKey = threadTs || ts;
+
+  // Post initial acknowledgment
+  const ackResult = await postMessage(
+    env.SLACK_BOT_TOKEN,
+    channel,
+    `Working on *${repo.fullName}*...`,
+    {
+      thread_ts: threadKey,
+      blocks: [
+        {
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: `Working on *${repo.fullName}*...\n_${result.reasoning}_`,
+          },
+        },
+      ],
+    }
+  );
+
+  const ackTs = ackResult.ts;
+
+  // Create session and send prompt using shared logic
+  const sessionResult = await startSessionAndSendPrompt(
+    env,
+    repo,
+    channel,
+    threadKey,
+    messageText,
+    user,
+    previousMessages,
     channelName,
     channelDescription,
-    previousMessages,
-  });
+    traceId
+  );
+
+  if (!sessionResult) {
+    return;
+  }
+
+  // Update the acknowledgment message with session link button
+  if (ackTs) {
+    await updateMessage(env.SLACK_BOT_TOKEN, channel, ackTs, `Working on *${repo.fullName}*...`, {
+      blocks: [
+        {
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: `Working on *${repo.fullName}*...\n_${result.reasoning}_`,
+          },
+        },
+        {
+          type: "actions",
+          elements: [
+            {
+              type: "button",
+              text: {
+                type: "plain_text",
+                text: "View Session",
+              },
+              url: `${env.WEB_APP_URL}/session/${sessionResult.sessionId}`,
+              action_id: "view_session",
+            },
+          ],
+        },
+      ],
+    });
+  }
+
+  // Post that the agent is working
+  await postSessionStartedMessage(env, channel, threadKey, sessionResult.sessionId);
 }
 
 /**
@@ -2103,8 +1771,22 @@ async function handleAppMention(
   env: Env,
   traceId?: string
 ): Promise<void> {
+  // Remove the bot mention from the text
   const messageText = stripMentions(event.text);
-  const { channelName, channelDescription } = await fetchChannelContext(env, event.channel);
+
+  // Get channel context
+  let channelName: string | undefined;
+  let channelDescription: string | undefined;
+
+  try {
+    const channelInfo = await getChannelInfo(env.SLACK_BOT_TOKEN, event.channel);
+    if (channelInfo.ok && channelInfo.channel) {
+      channelName = channelInfo.channel.name;
+      channelDescription = channelInfo.channel.topic?.value || channelInfo.channel.purpose?.value;
+    }
+  } catch {
+    // Channel info not available
+  }
 
   await handleIncomingMessage({
     text: messageText,
@@ -2164,8 +1846,8 @@ async function handleRepoSelection(
   env: Env,
   traceId?: string
 ): Promise<void> {
-  const threadKey = threadTs || messageTs;
-  const pendingKey = getPendingRepoSelectionKey(channel, threadKey);
+  // Retrieve pending message from KV
+  const pendingKey = `pending:${channel}:${threadTs || messageTs}`;
   const pendingData = await env.SLACK_KV.get(pendingKey, "json");
 
   if (!pendingData || typeof pendingData !== "object") {
@@ -2173,43 +1855,32 @@ async function handleRepoSelection(
       env.SLACK_BOT_TOKEN,
       channel,
       "Sorry, I couldn't find your original request. Please try again.",
-      { thread_ts: threadKey }
+      { thread_ts: threadTs || messageTs }
     );
     return;
   }
-  if (!isPendingRepoSelection(pendingData)) {
-    log.warn("slack.pending.invalid", {
-      trace_id: traceId,
-      channel,
-      thread_ts: threadKey,
-    });
-    await postMessage(
-      env.SLACK_BOT_TOKEN,
-      channel,
-      "Sorry, I couldn't find your original request. Please try again.",
-      { thread_ts: threadKey }
-    );
-    return;
-  }
-  const pendingSelection = pendingData as PendingRepoSelection;
 
-  if (pendingSelection.userId !== actingUserId) {
-    log.warn("slack.pending.user_mismatch", {
-      trace_id: traceId,
-      channel,
-      thread_ts: threadKey,
-      expected_user_id: pendingSelection.userId,
-      acting_user_id: actingUserId,
-    });
+  const pending = pendingData as {
+    message?: string;
+    userId: string;
+    previousMessages?: string[];
+    channelName?: string;
+    channelDescription?: string;
+    promptContent?: string;
+    reactionMessageTs?: string;
+  };
+
+  if (pending.userId !== actingUserId) {
     await postMessage(
       env.SLACK_BOT_TOKEN,
       channel,
       "Only the user who started this investigation can choose the repository.",
-      { thread_ts: threadKey }
+      { thread_ts: threadTs || messageTs }
     );
     return;
   }
 
+  // Find the repo config
   const repos = await getAvailableRepos(env, traceId);
   const repo = repos.find((r) => r.id === repoId);
 
@@ -2218,51 +1889,60 @@ async function handleRepoSelection(
       env.SLACK_BOT_TOKEN,
       channel,
       "Sorry, that repository is no longer available. Please try again.",
-      { thread_ts: threadKey }
+      { thread_ts: threadTs || messageTs }
     );
     return;
   }
 
-  let promptContent: string;
-  let sessionTitle: string;
-  let reactionMessageTs: string | undefined;
-
-  if (pendingSelection.kind === "reaction") {
-    promptContent = pendingSelection.promptContent;
-    sessionTitle = pendingSelection.sessionTitle;
-    reactionMessageTs = pendingSelection.reactionMessageTs;
-    if (pendingSelection.rootThreadTs !== threadKey) {
-      log.warn("slack.pending.thread_mismatch", {
-        trace_id: traceId,
-        channel,
-        expected_thread_ts: pendingSelection.rootThreadTs,
-        actual_thread_ts: threadKey,
-      });
-    }
-  } else {
-    promptContent = buildPromptContent(
-      pendingSelection.message,
-      pendingSelection.previousMessages,
-      pendingSelection.channelName,
-      pendingSelection.channelDescription
-    );
-    sessionTitle = buildSlackSessionTitle("Slack", pendingSelection.message);
-  }
-
-  await startSession({
-    env,
-    channel,
-    threadTs: threadKey,
-    userId: pendingSelection.userId,
-    traceId,
-    repo,
-    reasoning: "Repository selected manually.",
-    promptContent,
-    sessionTitle,
-    reactionMessageTs,
+  // Post acknowledgment
+  await postMessage(env.SLACK_BOT_TOKEN, channel, `Working on *${repo.fullName}*...`, {
+    thread_ts: threadTs || messageTs,
   });
 
+  const threadKey = threadTs || messageTs;
+
+  // If pending data has a pre-built prompt (e.g. from reaction-triggered investigation),
+  // use it directly; otherwise build from the original message + context.
+  const sessionResult = pending.promptContent
+    ? await startSessionAndSendPrompt(
+        env,
+        repo,
+        channel,
+        threadKey,
+        pending.promptContent,
+        pending.userId,
+        undefined,
+        undefined,
+        undefined,
+        traceId
+      )
+    : await startSessionAndSendPrompt(
+        env,
+        repo,
+        channel,
+        threadKey,
+        pending.message || "",
+        pending.userId,
+        pending.previousMessages,
+        pending.channelName,
+        pending.channelDescription,
+        traceId
+      );
+
+  if (!sessionResult) {
+    return;
+  }
+
+  // Clean up pending message
   await env.SLACK_KV.delete(pendingKey);
+
+  // Add progress reaction for reaction-originated investigations
+  if (pending.reactionMessageTs) {
+    await addReaction(env.SLACK_BOT_TOKEN, channel, pending.reactionMessageTs, "eyes");
+  }
+
+  // Post that the agent is working
+  await postSessionStartedMessage(env, channel, threadKey, sessionResult.sessionId);
 }
 
 /**

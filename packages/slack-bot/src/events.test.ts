@@ -289,7 +289,6 @@ describe("POST /events reaction handling", () => {
     expect(promptBody.callbackContext.threadTs).toBe("111.222");
     expect(promptBody.callbackContext.reactionMessageTs).toBe("111.222");
 
-    expect(mockUpdateMessage).toHaveBeenCalledOnce();
     expect(mockAddReaction).toHaveBeenCalledWith("xoxb-test", "C_ALERTS", "111.222", "eyes");
     expect((env.SLACK_KV as unknown as { get: ReturnType<typeof vi.fn> }).get).toHaveBeenCalledWith(
       "thread:C_ALERTS:111.222",
@@ -396,11 +395,10 @@ describe("POST /events reaction handling", () => {
     expect(promptBody.content).toContain("Reacted thread reply:\nThe API error rate is climbing");
     expect(promptBody.content).toContain("[alerts-bot]");
 
-    expect(mockPostMessage).toHaveBeenNthCalledWith(
-      1,
+    expect(mockPostMessage).toHaveBeenCalledWith(
       "xoxb-test",
       "C_REPLY",
-      expect.stringContaining("Working on *acme/app*"),
+      expect.stringContaining("Session started"),
       expect.objectContaining({ thread_ts: "111.222" })
     );
     expect(mockAddReaction).toHaveBeenCalledWith("xoxb-test", "C_REPLY", "222.333", "eyes");
@@ -615,9 +613,9 @@ describe("POST /events reaction handling", () => {
       env.SLACK_KV as unknown as { get: (key: string, type?: string) => Promise<unknown> }
     ).get("pending:C_ALERTS:111.222", "json");
     expect(storedPending).toMatchObject({
-      kind: "reaction",
+      userId: "U_TRIGGER",
       reactionMessageTs: "111.222",
-      rootThreadTs: "111.222",
+      promptContent: expect.stringContaining("Investigate the Slack alert below."),
     });
 
     const interactionPayload = {

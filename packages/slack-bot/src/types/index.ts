@@ -150,26 +150,6 @@ export type SlackInteractionPayload = {
   };
 };
 
-export interface PendingMessageSelection {
-  kind: "message";
-  message: string;
-  userId: string;
-  previousMessages?: string[];
-  channelName?: string;
-  channelDescription?: string;
-}
-
-export interface PendingReactionSelection {
-  kind: "reaction";
-  userId: string;
-  promptContent: string;
-  sessionTitle: string;
-  reactionMessageTs: string;
-  rootThreadTs: string;
-}
-
-export type PendingRepoSelection = PendingMessageSelection | PendingReactionSelection;
-
 /**
  * Callback context passed with prompts for follow-up notifications.
  */
