@@ -14,8 +14,6 @@ import type {
   UserPreferences,
   SlackInteractionPayload,
   PendingRepoSelection,
-  PendingMessageSelection,
-  PendingReactionSelection,
   SlackEvent,
   SlackReactionAddedEvent,
 } from "./types";
@@ -1676,6 +1674,151 @@ async function addProgressReaction(
   }
 }
 
+/**
+ * Shared tail: ack → create session → update ack with link → react → notify.
+ */
+interface StartSessionParams {
+  env: Env;
+  channel: string;
+  threadTs: string;
+  userId: string;
+  traceId?: string;
+  repo: RepoConfig;
+  reasoning: string;
+  promptContent: string;
+  sessionTitle: string;
+  reactionMessageTs?: string;
+}
+
+async function startSession(params: StartSessionParams): Promise<void> {
+  const {
+    env,
+    channel,
+    threadTs,
+    userId,
+    traceId,
+    repo,
+    reasoning,
+    promptContent,
+    sessionTitle,
+    reactionMessageTs,
+  } = params;
+
+  const ackTs = await postWorkingAckMessage(env, channel, threadTs, repo.fullName, reasoning);
+  const sessionResult = await createSlackSessionAndSendPrompt({
+    env,
+    repo,
+    channel,
+    threadTs,
+    sessionTitle,
+    promptContent,
+    userId,
+    reactionMessageTs,
+    traceId,
+  });
+
+  if (!sessionResult) {
+    return;
+  }
+
+  await updateWorkingAckMessage(
+    env,
+    channel,
+    ackTs,
+    repo.fullName,
+    reasoning,
+    sessionResult.sessionId
+  );
+  if (reactionMessageTs) {
+    await addProgressReaction(env, channel, reactionMessageTs, traceId);
+  }
+  await postSessionStartedMessage(env, channel, threadTs, sessionResult.sessionId);
+}
+
+/**
+ * Shared orchestration: classify the repo, then either ask for clarification
+ * (storing a pending selection) or start a session.
+ */
+interface ClassifyAndStartSessionParams extends StartSessionParams {
+  classificationText: string;
+  pendingSelection: PendingRepoSelection;
+  channelName?: string;
+  channelDescription?: string;
+  previousMessages?: string[];
+}
+
+async function classifyAndStartSession(
+  params: Omit<ClassifyAndStartSessionParams, "repo" | "reasoning">
+): Promise<void> {
+  const {
+    env,
+    channel,
+    threadTs,
+    userId,
+    traceId,
+    classificationText,
+    promptContent,
+    sessionTitle,
+    pendingSelection,
+    channelName,
+    channelDescription,
+    previousMessages,
+    reactionMessageTs,
+  } = params;
+
+  const classifier = createClassifier(env);
+  const result = await classifier.classify(
+    classificationText,
+    {
+      channelId: channel,
+      channelName,
+      channelDescription,
+      threadTs,
+      previousMessages,
+    },
+    traceId
+  );
+
+  if (result.needsClarification || !result.repo) {
+    const repos = await getAvailableRepos(env, traceId);
+    if (repos.length === 0) {
+      await postMessage(
+        env.SLACK_BOT_TOKEN,
+        channel,
+        "Sorry, no repositories are currently available. Please check that the GitHub App is installed and configured.",
+        { thread_ts: threadTs }
+      );
+      return;
+    }
+
+    const repoOptions = result.alternatives?.length
+      ? result.alternatives.slice(0, 5)
+      : repos.slice(0, 5);
+    await storePendingRepoSelection(env, channel, threadTs, pendingSelection);
+    await postRepoSelectionMessage(
+      env,
+      channel,
+      threadTs,
+      result.reasoning,
+      repoOptions.length > 0 ? repoOptions : repos.slice(0, 5)
+    );
+    return;
+  }
+
+  await startSession({
+    env,
+    channel,
+    threadTs,
+    userId,
+    traceId,
+    repo: result.repo,
+    reasoning: result.reasoning,
+    promptContent,
+    sessionTitle,
+    reactionMessageTs,
+  });
+}
+
 function logIgnoredInvestigateReaction(
   reason: string,
   event: Partial<SlackReactionAddedEvent>,
@@ -1796,86 +1939,28 @@ async function handleReactionAddedEvent(
   });
   const sessionTitle = buildSlackSessionTitle("Slack alert", primaryAlertText);
 
-  const classifier = createClassifier(env);
-  const result = await classifier.classify(
-    primaryAlertText,
-    {
-      channelId: channel,
-      channelName,
-      channelDescription,
-      threadTs: rootThreadTs,
-      previousMessages,
-    },
-    traceId
-  );
-
-  if (result.needsClarification || !result.repo) {
-    const repos = await getAvailableRepos(env, traceId);
-    if (repos.length === 0) {
-      await postMessage(
-        env.SLACK_BOT_TOKEN,
-        channel,
-        "Sorry, no repositories are currently available. Please check that the GitHub App is installed and configured.",
-        { thread_ts: rootThreadTs }
-      );
-      return;
-    }
-
-    const pendingSelection: PendingReactionSelection = {
+  await classifyAndStartSession({
+    env,
+    channel,
+    threadTs: rootThreadTs,
+    userId: event.user,
+    traceId,
+    classificationText: primaryAlertText,
+    promptContent,
+    sessionTitle,
+    pendingSelection: {
       kind: "reaction",
       userId: event.user,
       promptContent,
       sessionTitle,
       reactionMessageTs,
       rootThreadTs,
-    };
-    const repoOptions = result.alternatives?.length
-      ? result.alternatives.slice(0, 5)
-      : repos.slice(0, 5);
-    await storePendingRepoSelection(env, channel, rootThreadTs, pendingSelection);
-    await postRepoSelectionMessage(
-      env,
-      channel,
-      rootThreadTs,
-      result.reasoning,
-      repoOptions.length > 0 ? repoOptions : repos.slice(0, 5)
-    );
-    return;
-  }
-
-  const ackTs = await postWorkingAckMessage(
-    env,
-    channel,
-    rootThreadTs,
-    result.repo.fullName,
-    result.reasoning
-  );
-  const sessionResult = await createSlackSessionAndSendPrompt({
-    env,
-    repo: result.repo,
-    channel,
-    threadTs: rootThreadTs,
-    sessionTitle,
-    promptContent,
-    userId: event.user,
+    },
+    channelName,
+    channelDescription,
+    previousMessages,
     reactionMessageTs,
-    traceId,
   });
-
-  if (!sessionResult) {
-    return;
-  }
-
-  await updateWorkingAckMessage(
-    env,
-    channel,
-    ackTs,
-    result.repo.fullName,
-    result.reasoning,
-    sessionResult.sessionId
-  );
-  await addProgressReaction(env, channel, reactionMessageTs, traceId);
-  await postSessionStartedMessage(env, channel, rootThreadTs, sessionResult.sessionId);
 }
 
 /**
@@ -1973,95 +2058,34 @@ async function handleIncomingMessage(params: IncomingMessageParams): Promise<voi
     }
   }
 
-  // Classify the repository
-  const classifier = createClassifier(env);
-  const result = await classifier.classify(
-    messageText,
-    {
-      channelId: channel,
-      channelName,
-      channelDescription,
-      threadTs,
+  const threadKey = threadTs || ts;
+
+  await classifyAndStartSession({
+    env,
+    channel,
+    threadTs: threadKey,
+    userId: user,
+    traceId,
+    classificationText: messageText,
+    promptContent: buildPromptContent(
+      messageText,
       previousMessages,
-    },
-    traceId
-  );
-
-  // Post initial response
-  if (result.needsClarification || !result.repo) {
-    const repos = await getAvailableRepos(env, traceId);
-
-    if (repos.length === 0) {
-      await postMessage(
-        env.SLACK_BOT_TOKEN,
-        channel,
-        "Sorry, no repositories are currently available. Please check that the GitHub App is installed and configured.",
-        { thread_ts: threadTs || ts }
-      );
-      return;
-    }
-
-    const pendingSelection: PendingMessageSelection = {
+      channelName,
+      channelDescription
+    ),
+    sessionTitle: buildSlackSessionTitle("Slack", messageText),
+    pendingSelection: {
       kind: "message",
       message: messageText,
       userId: user,
       previousMessages,
       channelName,
       channelDescription,
-    };
-    const repoOptions = result.alternatives?.length
-      ? result.alternatives.slice(0, 5)
-      : repos.slice(0, 5);
-    await storePendingRepoSelection(env, channel, threadTs || ts, pendingSelection);
-    await postRepoSelectionMessage(
-      env,
-      channel,
-      threadTs || ts,
-      result.reasoning,
-      repoOptions.length > 0 ? repoOptions : repos.slice(0, 5)
-    );
-    return;
-  }
-
-  const { repo } = result;
-  const threadKey = threadTs || ts;
-  const promptContent = buildPromptContent(
-    messageText,
-    previousMessages,
+    },
     channelName,
-    channelDescription
-  );
-  const ackTs = await postWorkingAckMessage(
-    env,
-    channel,
-    threadKey,
-    repo.fullName,
-    result.reasoning
-  );
-  const sessionResult = await createSlackSessionAndSendPrompt({
-    env,
-    repo,
-    channel,
-    threadTs: threadKey,
-    sessionTitle: buildSlackSessionTitle("Slack", messageText),
-    promptContent,
-    userId: user,
-    traceId,
+    channelDescription,
+    previousMessages,
   });
-
-  if (!sessionResult) {
-    return;
-  }
-
-  await updateWorkingAckMessage(
-    env,
-    channel,
-    ackTs,
-    repo.fullName,
-    result.reasoning,
-    sessionResult.sessionId
-  );
-  await postSessionStartedMessage(env, channel, threadKey, sessionResult.sessionId);
 }
 
 /**
@@ -2199,11 +2223,9 @@ async function handleRepoSelection(
     return;
   }
 
-  const userId = pendingSelection.userId;
   let promptContent: string;
   let sessionTitle: string;
   let reactionMessageTs: string | undefined;
-  const reasoning = "Repository selected manually.";
 
   if (pendingSelection.kind === "reaction") {
     promptContent = pendingSelection.promptContent;
@@ -2227,36 +2249,20 @@ async function handleRepoSelection(
     sessionTitle = buildSlackSessionTitle("Slack", pendingSelection.message);
   }
 
-  const ackTs = await postWorkingAckMessage(env, channel, threadKey, repo.fullName, reasoning);
-  const sessionResult = await createSlackSessionAndSendPrompt({
+  await startSession({
     env,
-    repo,
     channel,
     threadTs: threadKey,
-    sessionTitle,
-    promptContent,
-    userId,
-    reactionMessageTs,
+    userId: pendingSelection.userId,
     traceId,
+    repo,
+    reasoning: "Repository selected manually.",
+    promptContent,
+    sessionTitle,
+    reactionMessageTs,
   });
 
-  if (!sessionResult) {
-    return;
-  }
-
   await env.SLACK_KV.delete(pendingKey);
-  await updateWorkingAckMessage(
-    env,
-    channel,
-    ackTs,
-    repo.fullName,
-    reasoning,
-    sessionResult.sessionId
-  );
-  if (reactionMessageTs) {
-    await addProgressReaction(env, channel, reactionMessageTs, traceId);
-  }
-  await postSessionStartedMessage(env, channel, threadKey, sessionResult.sessionId);
 }
 
 /**
