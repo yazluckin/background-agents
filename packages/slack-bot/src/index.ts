@@ -1842,7 +1842,6 @@ async function handleRepoSelection(
   channel: string,
   messageTs: string,
   threadTs: string | undefined,
-  actingUserId: string,
   env: Env,
   traceId?: string
 ): Promise<void> {
@@ -1869,16 +1868,6 @@ async function handleRepoSelection(
     promptContent?: string;
     reactionMessageTs?: string;
   };
-
-  if (pending.userId !== actingUserId) {
-    await postMessage(
-      env.SLACK_BOT_TOKEN,
-      channel,
-      "Only the user who started this investigation can choose the repository.",
-      { thread_ts: threadTs || messageTs }
-    );
-    return;
-  }
 
   // Find the repo config
   const repos = await getAvailableRepos(env, traceId);
@@ -2131,10 +2120,10 @@ async function handleSlackInteraction(
     }
 
     case "select_repo": {
-      if (!channel || !messageTs || !userId) return;
+      if (!channel || !messageTs) return;
       const repoId = action.selected_option?.value;
       if (repoId) {
-        await handleRepoSelection(repoId, channel, messageTs, threadTs, userId, env, traceId);
+        await handleRepoSelection(repoId, channel, messageTs, threadTs, env, traceId);
       }
       break;
     }
