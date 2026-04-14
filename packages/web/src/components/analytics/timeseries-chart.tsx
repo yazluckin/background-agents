@@ -1,3 +1,4 @@
+import { useId } from "react";
 import {
   Area,
   AreaChart,
@@ -34,6 +35,8 @@ const SERIES_COLORS = [
 ];
 
 export function AnalyticsTimeseriesChart({ series, loading }: TimeseriesChartProps) {
+  const chartIdPrefix = useId().replace(/[^a-zA-Z0-9_-]/g, "");
+
   if (loading && !series) {
     return (
       <div className="rounded-md border border-border-muted bg-card p-5 animate-pulse">
@@ -56,6 +59,11 @@ export function AnalyticsTimeseriesChart({ series, loading }: TimeseriesChartPro
   const { data, groupKeys } = buildTimeseriesChartData(series);
   const previewGroups = groupKeys.slice(0, 5);
   const hiddenGroups = Math.max(groupKeys.length - previewGroups.length, 0);
+
+  function getGradientId(groupKey: string, index: number) {
+    const safeKey = groupKey.replace(/[^a-zA-Z0-9_-]/g, "-");
+    return `${chartIdPrefix}-analytics-series-${index}-${safeKey}`;
+  }
 
   return (
     <div className="rounded-md border border-border-muted bg-card p-5">
@@ -81,15 +89,9 @@ export function AnalyticsTimeseriesChart({ series, loading }: TimeseriesChartPro
               <defs>
                 {groupKeys.map((groupKey, index) => {
                   const color = SERIES_COLORS[index % SERIES_COLORS.length];
+                  const gradientId = getGradientId(groupKey, index);
                   return (
-                    <linearGradient
-                      key={groupKey}
-                      id={`analytics-series-${groupKey}`}
-                      x1="0"
-                      y1="0"
-                      x2="0"
-                      y2="1"
-                    >
+                    <linearGradient key={groupKey} id={gradientId} x1="0" y1="0" x2="0" y2="1">
                       <stop offset="5%" stopColor={color} stopOpacity={0.32} />
                       <stop offset="95%" stopColor={color} stopOpacity={0.06} />
                     </linearGradient>
@@ -127,6 +129,7 @@ export function AnalyticsTimeseriesChart({ series, loading }: TimeseriesChartPro
               />
               {groupKeys.map((groupKey, index) => {
                 const color = SERIES_COLORS[index % SERIES_COLORS.length];
+                const gradientId = getGradientId(groupKey, index);
                 return (
                   <Area
                     key={groupKey}
@@ -134,7 +137,7 @@ export function AnalyticsTimeseriesChart({ series, loading }: TimeseriesChartPro
                     dataKey={groupKey}
                     stackId="sessions"
                     stroke={color}
-                    fill={`url(#analytics-series-${groupKey})`}
+                    fill={`url(#${gradientId})`}
                     strokeWidth={2}
                     dot={false}
                     activeDot={{ r: 3 }}

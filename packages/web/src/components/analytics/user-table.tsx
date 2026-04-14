@@ -120,6 +120,14 @@ export function AnalyticsUserTable({
   sortDirection,
   onSort,
 }: UserTableProps) {
+  function getAriaSort(column: AnalyticsUserSortKey): "ascending" | "descending" | "none" {
+    if (sortKey !== column) {
+      return "none";
+    }
+
+    return sortDirection === "asc" ? "ascending" : "descending";
+  }
+
   if (loading && !entries) {
     return (
       <div className="rounded-md border border-border-muted bg-card p-5 animate-pulse">
@@ -154,7 +162,7 @@ export function AnalyticsUserTable({
         <table className="min-w-full border-collapse text-sm">
           <thead className="bg-card">
             <tr className="border-b border-border-muted text-left text-secondary-foreground">
-              <th className="px-5 py-3">
+              <th className="px-5 py-3" aria-sort={getAriaSort("user")}>
                 <SortButton
                   label="User"
                   sortKey="user"
@@ -163,7 +171,7 @@ export function AnalyticsUserTable({
                   onClick={onSort}
                 />
               </th>
-              <th className="px-5 py-3">
+              <th className="px-5 py-3" aria-sort={getAriaSort("sessions")}>
                 <SortButton
                   label="Sessions"
                   sortKey="sessions"
@@ -172,7 +180,7 @@ export function AnalyticsUserTable({
                   onClick={onSort}
                 />
               </th>
-              <th className="px-5 py-3 text-right">
+              <th className="px-5 py-3 text-right" aria-sort={getAriaSort("completionRate")}>
                 <SortButton
                   label="Completion Rate"
                   sortKey="completionRate"
@@ -182,7 +190,7 @@ export function AnalyticsUserTable({
                   align="right"
                 />
               </th>
-              <th className="px-5 py-3 text-right">
+              <th className="px-5 py-3 text-right" aria-sort={getAriaSort("prs")}>
                 <SortButton
                   label="PRs"
                   sortKey="prs"
@@ -192,7 +200,7 @@ export function AnalyticsUserTable({
                   align="right"
                 />
               </th>
-              <th className="px-5 py-3 text-right">
+              <th className="px-5 py-3 text-right" aria-sort={getAriaSort("messageCount")}>
                 <SortButton
                   label="Messages"
                   sortKey="messageCount"
@@ -202,7 +210,7 @@ export function AnalyticsUserTable({
                   align="right"
                 />
               </th>
-              <th className="px-5 py-3 text-right">
+              <th className="px-5 py-3 text-right" aria-sort={getAriaSort("cost")}>
                 <SortButton
                   label="Total Cost"
                   sortKey="cost"
@@ -212,7 +220,7 @@ export function AnalyticsUserTable({
                   align="right"
                 />
               </th>
-              <th className="px-5 py-3 text-right">
+              <th className="px-5 py-3 text-right" aria-sort={getAriaSort("avgDuration")}>
                 <SortButton
                   label="Avg Duration"
                   sortKey="avgDuration"
@@ -222,7 +230,7 @@ export function AnalyticsUserTable({
                   align="right"
                 />
               </th>
-              <th className="px-5 py-3 text-right">
+              <th className="px-5 py-3 text-right" aria-sort={getAriaSort("lastActive")}>
                 <SortButton
                   label="Last Active"
                   sortKey="lastActive"

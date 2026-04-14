@@ -13,6 +13,7 @@ import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { useAnalyticsDashboard } from "@/hooks/use-analytics";
 import {
   ANALYTICS_DAYS,
+  ANALYTICS_REFRESH_INTERVAL_MS,
   ANALYTICS_RANGE_LABELS,
   formatAnalyticsCount,
   sortAnalyticsUserEntries,
@@ -28,13 +29,11 @@ export default function AnalyticsPage() {
   const [sortDirection, setSortDirection] = useState<AnalyticsSortDirection>("desc");
   const { summary, timeseries, repoBreakdown, userBreakdown, loading, error } =
     useAnalyticsDashboard(days);
+  const userEntries = userBreakdown?.entries;
 
   const sortedUserEntries = useMemo(
-    () =>
-      userBreakdown
-        ? sortAnalyticsUserEntries(userBreakdown.entries, sortKey, sortDirection)
-        : undefined,
-    [sortDirection, sortKey, userBreakdown?.entries]
+    () => (userEntries ? sortAnalyticsUserEntries(userEntries, sortKey, sortDirection) : undefined),
+    [sortDirection, sortKey, userEntries]
   );
 
   function handleSort(nextKey: AnalyticsUserSortKey) {
@@ -86,7 +85,9 @@ export default function AnalyticsPage() {
                   </p>
                 </div>
                 <div className="flex flex-wrap gap-2">
-                  <Badge variant="info">Refreshes every 30s</Badge>
+                  <Badge variant="info">
+                    Refreshes every {ANALYTICS_REFRESH_INTERVAL_MS / 1000}s
+                  </Badge>
                   <Badge variant="default">Includes legacy sessions</Badge>
                   {summary ? (
                     <Badge variant="pr-open">

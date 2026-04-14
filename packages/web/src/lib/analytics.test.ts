@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   buildTimeseriesChartData,
+  formatAnalyticsDate,
   formatAnalyticsDuration,
+  formatAnalyticsLongDate,
   formatCompletionRate,
   sortAnalyticsUserEntries,
 } from "./analytics";
@@ -88,5 +90,10 @@ describe("analytics utilities", () => {
     expect(formatAnalyticsDuration(4_000)).toBe("4s");
     expect(formatAnalyticsDuration(125_000)).toBe("2m 5s");
     expect(formatAnalyticsDuration(3_900_000)).toBe("1h 5m");
+  });
+
+  it("falls back to the raw value for invalid analytics dates", () => {
+    expect(formatAnalyticsDate("not-a-date")).toBe("not-a-date");
+    expect(formatAnalyticsLongDate("not-a-date")).toBe("not-a-date");
   });
 });

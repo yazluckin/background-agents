@@ -41,8 +41,9 @@ const LONG_DATE_FORMATTER = new Intl.DateTimeFormat("en-US", {
 
 const INTEGER_FORMATTER = new Intl.NumberFormat("en-US");
 
-function parseAnalyticsDate(value: string): Date {
-  return new Date(`${value}T00:00:00Z`);
+function parseAnalyticsDate(value: string): Date | null {
+  const date = new Date(`${value}T00:00:00Z`);
+  return Number.isNaN(date.getTime()) ? null : date;
 }
 
 export function formatAnalyticsCount(value: number): string {
@@ -50,11 +51,13 @@ export function formatAnalyticsCount(value: number): string {
 }
 
 export function formatAnalyticsDate(value: string): string {
-  return SHORT_DATE_FORMATTER.format(parseAnalyticsDate(value));
+  const parsed = parseAnalyticsDate(value);
+  return parsed ? SHORT_DATE_FORMATTER.format(parsed) : value;
 }
 
 export function formatAnalyticsLongDate(value: string): string {
-  return LONG_DATE_FORMATTER.format(parseAnalyticsDate(value));
+  const parsed = parseAnalyticsDate(value);
+  return parsed ? LONG_DATE_FORMATTER.format(parsed) : value;
 }
 
 export function formatAnalyticsDuration(durationMs: number): string {

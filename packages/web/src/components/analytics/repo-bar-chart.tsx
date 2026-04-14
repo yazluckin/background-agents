@@ -74,7 +74,10 @@ export function AnalyticsRepoBarChart({ entries, loading }: RepoBarChartProps) {
   }
 
   const chartHeight = Math.max(260, entries.length * 44);
-  const leadRepo = entries[0];
+  const leadRepo = entries.reduce(
+    (top, entry) => (entry.sessions > top.sessions ? entry : top),
+    entries[0]
+  );
   const chartData = entries.map((entry) => ({
     repo: entry.key,
     sessions: entry.sessions,
