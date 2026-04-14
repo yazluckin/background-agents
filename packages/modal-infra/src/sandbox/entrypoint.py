@@ -90,8 +90,6 @@ class SandboxSupervisor:
             session_id=session_id,
         )
 
-        self.log.info("session_config.loaded", keys=list(self.session_config.keys()))
-
     @property
     def base_branch(self) -> str:
         """The branch to clone/fetch — defaults to 'main'."""
@@ -294,42 +292,25 @@ class SandboxSupervisor:
             package_json.write_text('{"name": "opencode-tools", "type": "module"}')
 
     def _setup_openai_oauth(self) -> None:
-        """Write OpenCode auth.json for configured LLM providers.
-
-        Builds a unified auth.json from environment variables:
-        - OPENAI_OAUTH_REFRESH_TOKEN → OpenAI OAuth entry
-        - OPENCODE_ZEN_API_KEY → OpenCode Zen (pay-as-you-go) entry
-        - OPENCODE_GO_API_KEY → OpenCode Go (subscription) entry
-        """
-        auth_data: dict[str, dict] = {}
-
+        """Write OpenCode auth.json for ChatGPT OAuth if refresh token is configured."""
         refresh_token = os.environ.get("OPENAI_OAUTH_REFRESH_TOKEN")
-        if refresh_token:
-            entry: dict = {
-                "type": "oauth",
-                "refresh": "managed-by-control-plane",
-                "access": "",
-                "expires": 0,
-            }
-            account_id = os.environ.get("OPENAI_OAUTH_ACCOUNT_ID")
-            if account_id:
-                entry["accountId"] = account_id
-            auth_data["openai"] = entry
-
-        zen_key = os.environ.get("OPENCODE_ZEN_API_KEY")
-        if zen_key:
-            auth_data["opencode"] = {"type": "api", "key": zen_key}
-
-        go_key = os.environ.get("OPENCODE_GO_API_KEY")
-        if go_key:
-            auth_data["opencode-go"] = {"type": "api", "key": go_key}
-
-        if not auth_data:
+        if not refresh_token:
             return
 
         try:
             auth_dir = Path.home() / ".local" / "share" / "opencode"
             auth_dir.mkdir(parents=True, exist_ok=True)
+
+            openai_entry = {
+                "type": "oauth",
+                "refresh": "managed-by-control-plane",
+                "access": "",
+                "expires": 0,
+            }
+
+            account_id = os.environ.get("OPENAI_OAUTH_ACCOUNT_ID")
+            if account_id:
+                openai_entry["accountId"] = account_id
 
             auth_file = auth_dir / "auth.json"
             tmp_file = auth_dir / ".auth.json.tmp"
@@ -338,12 +319,12 @@ class SandboxSupervisor:
             # atomically rename so the target is never world-readable.
             fd = os.open(str(tmp_file), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             try:
-                os.write(fd, json.dumps(auth_data).encode())
+                os.write(fd, json.dumps({"openai": openai_entry}).encode())
             finally:
                 os.close(fd)
             tmp_file.replace(auth_file)
 
-            self.log.info("openai_oauth.setup", providers=list(auth_data.keys()))
+            self.log.info("openai_oauth.setup")
         except Exception as e:
             self.log.warn("openai_oauth.setup_error", exc=e)
 
@@ -787,7 +768,7 @@ class SandboxSupervisor:
 
     async def _report_fatal_error(self, message: str) -> None:
         """Report a fatal error to the control plane."""
-        self.log.error("supervisor.fatal", error_message=message)
+        self.log.error("supervisor.fatal", message=message)
 
         if not self.control_plane_url:
             return
