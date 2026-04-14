@@ -1,5 +1,6 @@
 import type { Logger } from "../../../logger";
 import type { ParticipantRow, SandboxRow, SessionRow } from "../../types";
+import type { SandboxSettings } from "@open-inspect/shared";
 import type { SandboxStatus, ServerMessage, SessionStatus, SpawnSource } from "../../../types";
 import type { SessionRepository } from "../../repository";
 import { getValidModelOrDefault, isValidModel } from "../../../utils/models";
@@ -22,10 +23,14 @@ interface InitRequest {
   scmEmail?: string;
   scmToken?: string | null;
   scmTokenEncrypted?: string | null;
+  scmRefreshTokenEncrypted?: string | null;
+  scmTokenExpiresAt?: number | null;
+  scmUserId?: string | null;
   parentSessionId?: string | null;
   spawnSource?: SpawnSource;
   spawnDepth?: number;
   codeServerEnabled?: boolean;
+  sandboxSettings?: SandboxSettings;
 }
 
 export interface SessionLifecycleHandlerDeps {
@@ -115,6 +120,7 @@ export function createSessionLifecycleHandler(
         spawnSource: body.spawnSource ?? "user",
         spawnDepth: body.spawnDepth ?? 0,
         codeServerEnabled: body.codeServerEnabled ?? false,
+        sandboxSettings: body.sandboxSettings ? JSON.stringify(body.sandboxSettings) : null,
         createdAt: now,
         updatedAt: now,
       });
@@ -131,10 +137,13 @@ export function createSessionLifecycleHandler(
       deps.repository.createParticipant({
         id: participantId,
         userId: body.userId,
+        scmUserId: body.scmUserId ?? null,
         scmLogin: body.scmLogin ?? null,
         scmName: body.scmName ?? null,
         scmEmail: body.scmEmail ?? null,
         scmAccessTokenEncrypted: encryptedToken,
+        scmRefreshTokenEncrypted: body.scmRefreshTokenEncrypted ?? null,
+        scmTokenExpiresAt: body.scmTokenExpiresAt ?? null,
         role: "owner",
         joinedAt: now,
       });
