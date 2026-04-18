@@ -15,7 +15,9 @@
     "lint:fix": "eslint 'src/**/*.ts' --fix",
     "format": "prettier --write 'src/**/*.ts'",
     "format:check": "prettier --check 'src/**/*.ts'",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist",
+    "rebuild": "npm run clean && npm run build"
   },
   "keywords": [
     "ai",
